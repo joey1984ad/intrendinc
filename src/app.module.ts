@@ -8,6 +8,7 @@ import { AuthModule } from './auth/auth.module';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module';
 import { StripeModule } from './stripe/stripe.module';
 import { FacebookModule } from './facebook/facebook.module';
+import { TikTokModule } from './tiktok/tiktok.module';
 import { AiModule } from './ai/ai.module';
 import { ShareableLinksModule } from './shareable-links/shareable-links.module';
 import { HealthController } from './common/health.controller';
@@ -15,6 +16,7 @@ import { ProxyImageController, ProxyImageBatchController } from './common/proxy-
 import { databaseConfig } from './config/database.config';
 import { stripeConfig } from './config/stripe.config';
 import { facebookConfig } from './config/facebook.config';
+import { tiktokConfig } from './config/tiktok.config';
 import { authConfig } from './config/auth.config';
 import { aiConfig } from './config/ai.config';
 
@@ -22,7 +24,7 @@ import { aiConfig } from './config/ai.config';
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      load: [databaseConfig, stripeConfig, facebookConfig, authConfig, aiConfig],
+      load: [databaseConfig, stripeConfig, facebookConfig, tiktokConfig, authConfig, aiConfig],
     }),
     DatabaseModule,
     UsersModule,
@@ -30,6 +32,7 @@ import { aiConfig } from './config/ai.config';
     SubscriptionsModule,
     StripeModule,
     FacebookModule,
+    TikTokModule,
     AiModule,
     ShareableLinksModule,
   ],
