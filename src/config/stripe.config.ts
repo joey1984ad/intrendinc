@@ -16,6 +16,18 @@ export const stripeConfig = registerAs('stripe', () => ({
   organizationBasicAnnualPriceId: process.env.STRIPE_ORGANIZATION_BASIC_ANNUAL_PRICE_ID,
   organizationProMonthlyPriceId: process.env.STRIPE_ORGANIZATION_PRO_MONTHLY_PRICE_ID,
   organizationProAnnualPriceId: process.env.STRIPE_ORGANIZATION_PRO_ANNUAL_PRICE_ID,
+
+  // Google Ads Platform Price IDs
+  googleAdsStarterMonthlyPriceId: process.env.STRIPE_GOOGLE_ADS_STARTER_MONTHLY_PRICE_ID,
+  googleAdsStarterAnnualPriceId: process.env.STRIPE_GOOGLE_ADS_STARTER_ANNUAL_PRICE_ID,
+  googleAdsProMonthlyPriceId: process.env.STRIPE_GOOGLE_ADS_PRO_MONTHLY_PRICE_ID,
+  googleAdsProAnnualPriceId: process.env.STRIPE_GOOGLE_ADS_PRO_ANNUAL_PRICE_ID,
+
+  // TikTok Platform Price IDs
+  tiktokStarterMonthlyPriceId: process.env.STRIPE_TIKTOK_STARTER_MONTHLY_PRICE_ID,
+  tiktokStarterAnnualPriceId: process.env.STRIPE_TIKTOK_STARTER_ANNUAL_PRICE_ID,
+  tiktokProMonthlyPriceId: process.env.STRIPE_TIKTOK_PRO_MONTHLY_PRICE_ID,
+  tiktokProAnnualPriceId: process.env.STRIPE_TIKTOK_PRO_ANNUAL_PRICE_ID,
 }));
 
 // Subscription status constants

@@ -1,4 +1,4 @@
-import { IsEmail, IsString, MinLength, IsOptional } from 'class-validator';
+import { IsEmail, IsString, MinLength, IsOptional, IsBoolean } from 'class-validator';
 
 export class LoginDto {
   @IsEmail({}, { message: 'Please provide a valid email address' })
@@ -28,4 +28,8 @@ export class RegisterDto {
   @IsOptional()
   @IsString()
   company?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  isTrialSignup?: boolean;
 }
