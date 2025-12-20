@@ -5,8 +5,8 @@ import { Repository, MoreThan } from 'typeorm';
 import { GoogleAdsSession } from './entities/google-ads-session.entity';
 import { GoogleAdsMetricsCache } from './entities/google-ads-metrics-cache.entity';
 import { GoogleAdsCampaignData } from './entities/google-ads-campaign-data.entity';
-import { PlatformMetrics, PlatformCampaign, PlatformAdGroup, PlatformAd, AdPlatform } from '../common/interfaces/ad-platform.interface';
-import { PlatformSubscriptionsService } from '../subscriptions/platform-subscriptions.service';
+import { PlatformMetrics, PlatformCampaign, PlatformAdGroup, PlatformAd } from '../common/interfaces/ad-platform.interface';
+import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 
 // Google Ads API base URL
 const GOOGLE_ADS_API_BASE = 'https://googleads.googleapis.com';
@@ -48,8 +48,8 @@ export class GoogleAdsService {
     private readonly metricsCacheRepository: Repository<GoogleAdsMetricsCache>,
     @InjectRepository(GoogleAdsCampaignData)
     private readonly campaignDataRepository: Repository<GoogleAdsCampaignData>,
-    @Inject(forwardRef(() => PlatformSubscriptionsService))
-    private readonly platformSubscriptionsService: PlatformSubscriptionsService,
+    @Inject(forwardRef(() => SubscriptionsService))
+    private readonly subscriptionsService: SubscriptionsService,
   ) {
     const googleAdsConfig = this.configService.get('googleAds');
     this.clientId = googleAdsConfig?.clientId || '';
@@ -67,17 +67,15 @@ export class GoogleAdsService {
   // ==================== SUBSCRIPTION VALIDATION ====================
 
   /**
-   * Check if user has an active Google Ads subscription
+   * Check if user has paid access to any Google Ads accounts
+   * Uses the organization seats with platform='google'
    */
   async validateSubscription(userId: number): Promise<void> {
-    const hasSubscription = await this.platformSubscriptionsService.hasActivePlatformSubscription(
-      userId,
-      AdPlatform.GOOGLE,
-    );
+    const seats = await this.subscriptionsService.getOrganizationSeats(userId, 'google');
 
-    if (!hasSubscription) {
+    if (seats.length === 0) {
       throw new ForbiddenException(
-        'Active Google Ads subscription required. Please subscribe to access Google Ads features.',
+        'No active Google Ads subscriptions. Please subscribe to at least one Google Ads account.',
       );
     }
   }
@@ -86,20 +84,10 @@ export class GoogleAdsService {
    * Check if user can access a specific Google Ads customer account
    */
   async validateCustomerAccess(userId: number, customerId: string): Promise<void> {
-    const subscription = await this.platformSubscriptionsService.getPlatformSubscription(
-      userId,
-      AdPlatform.GOOGLE,
-    );
+    const seats = await this.subscriptionsService.getOrganizationSeats(userId, 'google');
+    const hasAccess = seats.some(seat => seat.adAccountId === customerId);
 
-    if (!subscription) {
-      throw new ForbiddenException(
-        'Active Google Ads subscription required. Please subscribe to access Google Ads features.',
-      );
-    }
-
-    // Check if this customer ID is in the user's seats
-    const seat = await this.platformSubscriptionsService.getPlatformSeat(subscription.id, customerId);
-    if (!seat) {
+    if (!hasAccess) {
       throw new ForbiddenException(
         'This Google Ads customer account is not included in your subscription. Please add it to your plan.',
       );
@@ -107,43 +95,33 @@ export class GoogleAdsService {
   }
 
   /**
-   * Get subscription status for the user
+   * Get list of Google Ads accounts user has paid access to
+   */
+  async getPaidCustomerIds(userId: number): Promise<string[]> {
+    const seats = await this.subscriptionsService.getOrganizationSeats(userId, 'google');
+    return seats.map(seat => seat.adAccountId);
+  }
+
+  /**
+   * Get subscription status for the user (Google Ads accounts)
    */
   async getSubscriptionStatus(userId: number): Promise<{
     hasSubscription: boolean;
-    subscription?: any;
-    seats?: any[];
-    canAddMoreSeats?: boolean;
+    paidAccounts?: { id: string; name: string; addedAt: Date }[];
   }> {
-    const subscription = await this.platformSubscriptionsService.getPlatformSubscription(
-      userId,
-      AdPlatform.GOOGLE,
-    );
+    const seats = await this.subscriptionsService.getOrganizationSeats(userId, 'google');
 
-    if (!subscription) {
+    if (seats.length === 0) {
       return { hasSubscription: false };
     }
 
-    const seats = await this.platformSubscriptionsService.getPlatformSeats(subscription.id);
-    const canAddMoreSeats = await this.platformSubscriptionsService.canAddMoreSeats(subscription.id);
-
     return {
       hasSubscription: true,
-      subscription: {
-        id: subscription.id,
-        planId: subscription.planId,
-        planName: subscription.planName,
-        status: subscription.status,
-        quantity: subscription.quantity,
-        currentPeriodEnd: subscription.currentPeriodEnd,
-        cancelAtPeriodEnd: subscription.cancelAtPeriodEnd,
-      },
-      seats: seats.map(s => ({
-        adAccountId: s.adAccountId,
-        adAccountName: s.adAccountName,
+      paidAccounts: seats.map(s => ({
+        id: s.adAccountId,
+        name: s.adAccountName,
         addedAt: s.addedAt,
       })),
-      canAddMoreSeats,
     };
   }
 

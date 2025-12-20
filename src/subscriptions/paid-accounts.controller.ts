@@ -1,4 +1,4 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
+import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -9,18 +9,25 @@ export class PaidAccountsController {
 
   @Get()
   @UseGuards(JwtAuthGuard)
-  async getPaidAccounts(@CurrentUser() user: any) {
-    const seats = await this.subscriptionsService.getOrganizationSeats(user.userId);
+  async getPaidAccounts(
+    @CurrentUser() user: any,
+    @Query('platform') platform?: string,
+  ) {
+    // If platform is provided, filter by platform; otherwise return all
+    const seats = await this.subscriptionsService.getOrganizationSeats(user.id, platform);
     
     return {
       success: true,
-      paidAccounts: seats.map(seat => ({
-        adAccountId: seat.adAccountId,
-        adAccountName: seat.adAccountName,
-        status: seat.status,
+      accounts: seats.map(seat => ({
+        id: seat.adAccountId,
+        name: seat.adAccountName,
+        isPaid: true,
+        isPrimary: false,
+        platform: seat.platform,
         addedAt: seat.addedAt,
       })),
       count: seats.length,
     };
   }
 }
+

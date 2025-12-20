@@ -30,16 +30,14 @@ export class GoogleAdsController {
   // ==================== SUBSCRIPTION ====================
 
   /**
-   * Get subscription status
+   * Get subscription status (paid Google Ads accounts)
    */
   @Get('subscription/status')
   @UseGuards(JwtAuthGuard)
   async getSubscriptionStatus(@Req() req: AuthenticatedRequest): Promise<{
     success: boolean;
     hasSubscription: boolean;
-    subscription?: any;
-    seats?: any[];
-    canAddMoreSeats?: boolean;
+    paidAccounts?: { id: string; name: string; addedAt: Date }[];
   }> {
     if (!req.user?.id) {
       throw new UnauthorizedException('Not authenticated');
@@ -188,7 +186,7 @@ export class GoogleAdsController {
   // ==================== CUSTOMERS ====================
 
   /**
-   * Get accessible customer accounts
+   * Get accessible customer accounts (no subscription required - for selection)
    */
   @Get('customers')
   @UseGuards(JwtAuthGuard)
@@ -200,15 +198,14 @@ export class GoogleAdsController {
       throw new UnauthorizedException('Not authenticated');
     }
 
-    // Subscription validation - user needs active subscription
-    await this.googleAdsService.validateSubscription(req.user.id);
-
+    // No subscription validation - users should be able to see their accounts
+    // to choose which ones to subscribe to
     const customers = await this.googleAdsService.getAccessibleCustomers(req.user.id);
     return { success: true, customers };
   }
 
   /**
-   * Select a customer account
+   * Select a customer account (no subscription required - for browsing)
    */
   @Post('customers/select')
   @UseGuards(JwtAuthGuard)
@@ -220,9 +217,8 @@ export class GoogleAdsController {
       throw new UnauthorizedException('Not authenticated');
     }
 
-    // Subscription validation - user needs active subscription
-    await this.googleAdsService.validateSubscription(req.user.id);
-
+    // No subscription validation - users can select any account they have OAuth access to
+    // Subscription is checked when accessing data (campaigns, metrics, etc.)
     return this.googleAdsService.selectCustomer(req.user.id, body.customerId, body.customerName);
   }
 

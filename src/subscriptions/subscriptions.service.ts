@@ -148,12 +148,19 @@ export class SubscriptionsService {
     return this.organizationSubscriptionRepository.findOneBy({ id });
   }
 
-  async addOrganizationSeat(organizationSubscriptionId: number, userId: number, adAccountId: string, adAccountName: string): Promise<OrganizationSeat> {
+  async addOrganizationSeat(
+    organizationSubscriptionId: number, 
+    userId: number, 
+    adAccountId: string, 
+    adAccountName: string,
+    platform: string = 'facebook',
+  ): Promise<OrganizationSeat> {
     const seat = this.organizationSeatRepository.create({
       organizationSubscriptionId,
       userId,
       adAccountId,
       adAccountName,
+      platform,
       status: 'active',
       addedAt: new Date(),
     });
@@ -165,9 +172,13 @@ export class SubscriptionsService {
     return this.organizationBillingHistoryRepository.save(history);
   }
 
-  async getOrganizationSeats(userId: number): Promise<OrganizationSeat[]> {
+  async getOrganizationSeats(userId: number, platform?: string): Promise<OrganizationSeat[]> {
+    const where: any = { userId, status: 'active' };
+    if (platform) {
+      where.platform = platform;
+    }
     return this.organizationSeatRepository.find({
-      where: { userId, status: 'active' },
+      where,
       order: { addedAt: 'DESC' },
     });
   }

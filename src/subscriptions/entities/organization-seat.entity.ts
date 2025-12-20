@@ -27,6 +27,9 @@ export class OrganizationSeat {
   @Column({ name: 'ad_account_name' })
   adAccountName: string;
 
+  @Column({ default: 'facebook' })
+  platform: string; // 'facebook' | 'google' | 'tiktok'
+
   @Column({ default: 'active' })
   status: string;
 
@@ -36,3 +39,4 @@ export class OrganizationSeat {
   @Column({ name: 'removed_at', nullable: true })
   removedAt: Date;
 }
+
