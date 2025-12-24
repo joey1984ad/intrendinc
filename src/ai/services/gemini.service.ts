@@ -111,7 +111,8 @@ export class GeminiService {
     dimensions: Record<string, number>;
   }> {
     const fullModelName = this.modelName.includes('/') ? this.modelName : `models/${this.modelName}`;
-    const url = `https://generativelanguage.googleapis.com/v1/${fullModelName}:generateContent?key=${this.apiKey}`;
+    // Use v1beta for image analysis as per Google's documentation
+    const url = `https://generativelanguage.googleapis.com/v1beta/${fullModelName}:generateContent?key=${this.apiKey}`;
 
     const prompt = this.buildAnalysisPrompt();
 
@@ -250,5 +251,41 @@ Provide your response in this JSON format:
       url.includes('scontent.xx.fbcdn.net') ||
       url.includes('scontent.cdninstagram.com')
     );
+  }
+
+  /**
+   * List available Gemini models
+   * Uses https://generativelanguage.googleapis.com/v1/models endpoint
+   */
+  async listModels(): Promise<{ models: Array<{ name: string; displayName: string; supportedGenerationMethods: string[] }> }> {
+    if (!this.apiKey) {
+      throw new ServiceUnavailableException('Google AI Studio API key is not configured');
+    }
+
+    const url = `https://generativelanguage.googleapis.com/v1/models?key=${this.apiKey}`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(`Failed to list models: ${response.status} - ${errorData.error?.message || 'Unknown error'}`);
+      }
+
+      const result = await response.json();
+      return {
+        models: result.models?.map((model: any) => ({
+          name: model.name,
+          displayName: model.displayName,
+          supportedGenerationMethods: model.supportedGenerationMethods || [],
+        })) || [],
+      };
+    } catch (error) {
+      this.logger.error(`Failed to list models: ${error}`);
+      throw error;
+    }
   }
 }

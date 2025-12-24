@@ -1,11 +1,26 @@
 import { Controller, Get, Post, Put, Delete, Body, Query, Param, UseGuards, BadRequestException } from '@nestjs/common';
 import { AiService } from './ai.service';
+import { GeminiService } from './services/gemini.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 
 @Controller('ai')
 export class AiController {
-  constructor(private readonly aiService: AiService) {}
+  constructor(
+    private readonly aiService: AiService,
+    private readonly geminiService: GeminiService,
+  ) {}
+
+  // List available Gemini models
+  @Get('models')
+  @UseGuards(JwtAuthGuard)
+  async listModels() {
+    const result = await this.geminiService.listModels();
+    return {
+      success: true,
+      ...result,
+    };
+  }
 
   // Creative Score endpoints
   @Post('creative-score')
