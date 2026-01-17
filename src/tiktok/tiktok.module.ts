@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule } from '@nestjs/config';
 import { TikTokService } from './tiktok.service';
@@ -9,6 +9,7 @@ import { TikTokMetricsCache } from './entities/tiktok-metrics-cache.entity';
 import { TikTokCreativesCache } from './entities/tiktok-creatives-cache.entity';
 import { TikTokCampaignData } from './entities/tiktok-campaign-data.entity';
 import { AiModule } from '../ai/ai.module';
+import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { AiModule } from '../ai/ai.module';
     ]),
     ConfigModule,
     AiModule,
+    forwardRef(() => SubscriptionsModule),
   ],
   controllers: [TikTokController, TikTokAiController],
   providers: [TikTokService],

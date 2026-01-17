@@ -2,10 +2,12 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, LessThan } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
+import { Inject, forwardRef, ForbiddenException } from '@nestjs/common';
 import { TikTokSession } from './entities/tiktok-session.entity';
 import { TikTokMetricsCache } from './entities/tiktok-metrics-cache.entity';
 import { TikTokCreativesCache } from './entities/tiktok-creatives-cache.entity';
 import { TikTokCampaignData } from './entities/tiktok-campaign-data.entity';
+import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { 
   AdPlatform, 
   PlatformSession, 
@@ -97,7 +99,70 @@ export class TikTokService {
     @InjectRepository(TikTokCampaignData)
     private campaignDataRepository: Repository<TikTokCampaignData>,
     private configService: ConfigService,
+    @Inject(forwardRef(() => SubscriptionsService))
+    private readonly subscriptionsService: SubscriptionsService,
   ) {}
+
+  // ==================== SUBSCRIPTION VALIDATION ====================
+
+  /**
+   * Check if user has paid access to any TikTok Ads accounts
+   */
+  async validateSubscription(userId: number): Promise<void> {
+    const seats = await this.subscriptionsService.getOrganizationSeats(userId, 'tiktok');
+
+    if (seats.length === 0) {
+      throw new ForbiddenException(
+        'No active TikTok Ads subscriptions. Please subscribe to at least one TikTok Ads account.',
+      );
+    }
+  }
+
+  /**
+   * Check if user can access a specific TikTok advertiser account
+   */
+  async validateAdvertiserAccess(userId: number, advertiserId: string): Promise<void> {
+    const seats = await this.subscriptionsService.getOrganizationSeats(userId, 'tiktok');
+    const hasAccess = seats.some(seat => seat.adAccountId === advertiserId);
+
+    if (!hasAccess) {
+      throw new ForbiddenException(
+        'This TikTok advertiser account is not included in your subscription. Please add it to your plan.',
+      );
+    }
+  }
+
+  /**
+   * Get list of TikTok advertiser accounts user has paid access to
+   */
+  async getPaidAdvertiserIds(userId: number): Promise<string[]> {
+    const seats = await this.subscriptionsService.getOrganizationSeats(userId, 'tiktok');
+    return seats.map(seat => seat.adAccountId);
+  }
+
+  /**
+   * Get subscription status for TikTok Ads
+   */
+  async getSubscriptionStatus(userId: number): Promise<{
+    hasSubscription: boolean;
+    advertiserIds: string[];
+    planType?: string;
+  }> {
+    const seats = await this.subscriptionsService.getOrganizationSeats(userId, 'tiktok');
+    
+    if (seats.length === 0) {
+      return {
+        hasSubscription: false,
+        advertiserIds: [],
+      };
+    }
+
+    return {
+      hasSubscription: true,
+      advertiserIds: seats.map(seat => seat.adAccountId),
+      planType: seats[0]?.organizationSubscription?.planName,
+    };
+  }
 
   // ==================== SESSION MANAGEMENT ====================
 
@@ -554,6 +619,56 @@ export class TikTokService {
   }
 
   // ==================== CREATIVES ====================
+
+  async getCreatives(
+    accessToken: string,
+    advertiserId: string,
+    dateRange?: PlatformDateRange,
+  ): Promise<PlatformApiResponse<any[]>> {
+    try {
+      // First, get all ads to extract creative IDs
+      const adsResult = await this.getAds(accessToken, advertiserId, undefined, dateRange);
+      
+      if (!adsResult.success || !adsResult.data) {
+        return { success: false, error: adsResult.error || 'Failed to fetch ads' };
+      }
+
+      const creativeIds = [...new Set(adsResult.data.map(ad => ad.creativeId).filter((id): id is string => !!id))];
+      
+      if (creativeIds.length === 0) {
+        return { success: true, data: [] };
+      }
+
+      // Fetch creative details for each unique creative ID
+      const creatives = await Promise.all(
+        creativeIds.map(async (creativeId) => {
+          try {
+            const creative = await this.getCreativeInfo(accessToken, advertiserId, creativeId);
+            return {
+              id: creativeId,
+              ...creative,
+            };
+          } catch (error) {
+            this.logger.warn(`Failed to fetch creative ${creativeId}: ${error.message}`);
+            return null;
+          }
+        })
+      );
+
+      const validCreatives = creatives.filter(c => c !== null);
+
+      return {
+        success: true,
+        data: validCreatives,
+        pagination: {
+          totalCount: validCreatives.length,
+          hasMore: false,
+        },
+      };
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
+  }
 
   async getCreativeInfo(accessToken: string, advertiserId: string, creativeId: string): Promise<any> {
     const url = `${this.baseUrl}/${this.apiVersion}/creative/get/`;

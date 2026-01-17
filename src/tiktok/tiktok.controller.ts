@@ -103,7 +103,90 @@ export class TikTokController {
     }
   }
 
+  @Post('auth/callback')
+  @UseGuards(JwtAuthGuard)
+  async handleAuthCallbackPost(
+    @CurrentUser() user: any,
+    @Body() body: { code: string; state?: string },
+  ) {
+    try {
+      const { code: authCode, state } = body;
+
+      if (!authCode) {
+        throw new BadRequestException('Missing authorization code');
+      }
+
+      const userId = user.userId;
+      const appId = this.configService.get<string>('tiktok.appId');
+      const appSecret = this.configService.get<string>('tiktok.appSecret');
+
+      // Exchange auth code for access token
+      const tokenResponse = await fetch('https://business-api.tiktok.com/open_api/v1.3/oauth2/access_token/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          app_id: appId,
+          secret: appSecret,
+          auth_code: authCode,
+        }),
+      });
+
+      const tokenData = await tokenResponse.json();
+
+      if (tokenData.code !== 0) {
+        throw new Error(`Token exchange failed: ${tokenData.message}`);
+      }
+
+      const { access_token, refresh_token, expires_in, refresh_token_expires_in, advertiser_ids } = tokenData.data;
+
+      const tokenExpiresAt = new Date(Date.now() + expires_in * 1000);
+      const refreshTokenExpiresAt = new Date(Date.now() + refresh_token_expires_in * 1000);
+
+      // Get first advertiser info
+      let advertiserName: string | undefined;
+      if (advertiser_ids?.length > 0) {
+        try {
+          const advertiserInfo = await this.tiktokService.getAdvertiserInfo(access_token, advertiser_ids[0]);
+          advertiserName = advertiserInfo?.name;
+        } catch (e) {
+          // Continue without advertiser name
+        }
+      }
+
+      await this.tiktokService.saveSession(
+        userId,
+        access_token,
+        refresh_token,
+        advertiser_ids?.[0],
+        advertiserName,
+        tokenExpiresAt,
+        refreshTokenExpiresAt,
+      );
+
+      return {
+        success: true,
+        message: 'Successfully connected to TikTok Ads',
+        session: {
+          advertiserId: advertiser_ids?.[0],
+          advertiserName,
+        },
+      };
+    } catch (error: any) {
+      throw new BadRequestException(error.message || 'Failed to complete TikTok authorization');
+    }
+  }
+
   // ==================== SESSION ====================
+
+  @Get('subscription/status')
+  @UseGuards(JwtAuthGuard)
+  async getSubscriptionStatus(@CurrentUser() user: any) {
+    const status = await this.tiktokService.getSubscriptionStatus(user.userId);
+    return {
+      success: true,
+      ...status,
+    };
+  }
 
   @Get('session')
   @UseGuards(JwtAuthGuard)
@@ -192,6 +275,10 @@ export class TikTokController {
       throw new BadRequestException('No TikTok session or advertiser selected');
     }
 
+    // Subscription validation
+    await this.tiktokService.validateSubscription(user.userId);
+    await this.tiktokService.validateAdvertiserAccess(user.userId, session.advertiserId);
+
     const dateRange = since && until ? { since, until } : undefined;
     const result = await this.tiktokService.getCampaigns(session.accessToken, session.advertiserId, dateRange);
     return result;
@@ -224,6 +311,10 @@ export class TikTokController {
       throw new BadRequestException('No TikTok session or advertiser selected');
     }
 
+    // Subscription validation
+    await this.tiktokService.validateSubscription(user.userId);
+    await this.tiktokService.validateAdvertiserAccess(user.userId, session.advertiserId);
+
     const dateRange = since && until ? { since, until } : undefined;
     const result = await this.tiktokService.getAdGroups(session.accessToken, session.advertiserId, campaignId, dateRange);
     return result;
@@ -255,6 +346,10 @@ export class TikTokController {
     if (!session || !session.advertiserId) {
       throw new BadRequestException('No TikTok session or advertiser selected');
     }
+
+    // Subscription validation
+    await this.tiktokService.validateSubscription(user.userId);
+    await this.tiktokService.validateAdvertiserAccess(user.userId, session.advertiserId);
 
     const dateRange = since && until ? { since, until } : undefined;
     const result = await this.tiktokService.getAds(session.accessToken, session.advertiserId, adGroupId, dateRange);
@@ -291,11 +386,36 @@ export class TikTokController {
       throw new BadRequestException('No TikTok session or advertiser selected');
     }
 
+    // Subscription validation
+    await this.tiktokService.validateSubscription(user.userId);
+    await this.tiktokService.validateAdvertiserAccess(user.userId, session.advertiserId);
+
     const result = await this.tiktokService.getAccountMetrics(session.accessToken, session.advertiserId, { since, until });
     return result;
   }
 
   // ==================== CREATIVES ====================
+
+  @Get('creatives')
+  @UseGuards(JwtAuthGuard)
+  async getCreatives(
+    @CurrentUser() user: any,
+    @Query('since') since?: string,
+    @Query('until') until?: string,
+  ) {
+    const session = await this.tiktokService.getSession(user.userId);
+    if (!session || !session.advertiserId) {
+      throw new BadRequestException('No TikTok session or advertiser selected');
+    }
+
+    // Subscription validation
+    await this.tiktokService.validateSubscription(user.userId);
+    await this.tiktokService.validateAdvertiserAccess(user.userId, session.advertiserId);
+
+    const dateRange = since && until ? { since, until } : undefined;
+    const result = await this.tiktokService.getCreatives(session.accessToken, session.advertiserId, dateRange);
+    return result;
+  }
 
   @Get('creatives/:id')
   @UseGuards(JwtAuthGuard)

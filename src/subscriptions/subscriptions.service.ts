@@ -179,6 +179,7 @@ export class SubscriptionsService {
     }
     return this.organizationSeatRepository.find({
       where,
+      relations: ['organizationSubscription'],
       order: { addedAt: 'DESC' },
     });
   }
