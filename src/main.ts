@@ -33,7 +33,7 @@ async function bootstrap() {
   // CORS
   app.enableCors({
     // origin: process.env.FRONTEND_URL || 'http://localhost:3000',
-    origin: '*',
+    origin: ['http://localhost:3000', 'https://api.gpthumanize.pro', 'https://itsintrend.com'],
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
