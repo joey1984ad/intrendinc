@@ -15,10 +15,12 @@ async function bootstrap() {
     // origin: process.env.FRONTEND_URL || 'http://localhost:3000',
     origin: ['http://localhost:3000', 'https://itsintrend.com', 'https://gpthumanize.pro', 'https://www.gpthumanize.pro'],    credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
   });
   // Security
-  app.use(helmet());
+  app.use(helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  }));
   
   // Compression
   app.use(compression());
