@@ -10,7 +10,13 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
     rawBody: true,
   });
-  
+    // CORS
+  app.enableCors({
+    // origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+    origin: ['http://localhost:3000', 'https://itsintrend.com', 'https://gpthumanize.pro', 'https://www.gpthumanize.pro'],    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  });
   // Security
   app.use(helmet());
   
@@ -30,14 +36,7 @@ async function bootstrap() {
     },
   }));
   
-  // CORS
-  app.enableCors({
-    // origin: process.env.FRONTEND_URL || 'http://localhost:3000',
-    origin: ['http://localhost:3000', 'https://itsintrend.com', 'https://gpthumanize.pro', 'https://www.gpthumanize.pro'],
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-  });
+
 
   // Swagger API Documentation
   if (process.env.NODE_ENV !== 'production') {
