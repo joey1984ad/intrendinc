@@ -94,13 +94,42 @@ export class TikTokController {
       const tokenData = await tokenResponse.json();
 
       if (tokenData.code !== 0) {
+        console.error('TikTok token exchange failed:', {
+          code: tokenData.code,
+          message: tokenData.message,
+          data: tokenData.data,
+        });
         throw new Error(`Token exchange failed: ${tokenData.message}`);
       }
 
       const { access_token, refresh_token, expires_in, refresh_token_expires_in, advertiser_ids } = tokenData.data;
 
-      const tokenExpiresAt = new Date(Date.now() + expires_in * 1000);
-      const refreshTokenExpiresAt = new Date(Date.now() + refresh_token_expires_in * 1000);
+      console.log('TikTok token data received:', {
+        hasAccessToken: !!access_token,
+        hasRefreshToken: !!refresh_token,
+        expiresIn: expires_in,
+        refreshExpiresIn: refresh_token_expires_in,
+        advertiserCount: advertiser_ids?.length,
+      });
+
+      // Safely calculate expiration dates with fallbacks
+      // TikTok typically provides expires_in in seconds (default: 86400 = 24 hours)
+      const expiresInSeconds = parseInt(expires_in) || 86400;
+      const refreshExpiresInSeconds = parseInt(refresh_token_expires_in) || 2592000; // 30 days default
+      
+      const tokenExpiresAt = new Date(Date.now() + expiresInSeconds * 1000);
+      const refreshTokenExpiresAt = new Date(Date.now() + refreshExpiresInSeconds * 1000);
+
+      // Validate the dates are valid
+      if (isNaN(tokenExpiresAt.getTime()) || isNaN(refreshTokenExpiresAt.getTime())) {
+        console.error('Invalid date calculation:', {
+          expiresInSeconds,
+          refreshExpiresInSeconds,
+          tokenExpiresAt,
+          refreshTokenExpiresAt,
+        });
+        throw new Error('Invalid token expiration data received from TikTok');
+      }
 
       // Get first advertiser info
       let advertiserName: string | undefined;
