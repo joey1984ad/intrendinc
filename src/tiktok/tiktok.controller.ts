@@ -38,68 +38,28 @@ export class TikTokController {
   @Get('auth/callback')
   async handleAuthCallback(
     @Query('auth_code') authCode: string,
+    @Query('code') code: string,
     @Query('state') state: string,
     @Res() res: Response,
   ) {
     try {
-      if (!authCode || !state) {
+      // TikTok can send either auth_code or code parameter
+      const authorizationCode = authCode || code;
+      
+      if (!authorizationCode || !state) {
         throw new BadRequestException('Missing auth_code or state');
       }
 
-      const stateData = JSON.parse(Buffer.from(state, 'base64').toString());
-      const userId = stateData.userId;
-
-      const appId = this.configService.get<string>('tiktok.appId');
-      const appSecret = this.configService.get<string>('tiktok.appSecret');
-
-      // Exchange auth code for access token
-      const tokenResponse = await fetch('https://business-api.tiktok.com/open_api/v1.3/oauth2/access_token/', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          app_id: appId,
-          secret: appSecret,
-          auth_code: authCode,
-        }),
-      });
-
-      const tokenData = await tokenResponse.json();
-
-      if (tokenData.code !== 0) {
-        throw new Error(`Token exchange failed: ${tokenData.message}`);
-      }
-
-      const { access_token, refresh_token, expires_in, refresh_token_expires_in, advertiser_ids } = tokenData.data;
-
-      const tokenExpiresAt = new Date(Date.now() + expires_in * 1000);
-      const refreshTokenExpiresAt = new Date(Date.now() + refresh_token_expires_in * 1000);
-
-      // Get first advertiser info
-      let advertiserName: string | undefined;
-      if (advertiser_ids?.length > 0) {
-        try {
-          const advertiserInfo = await this.tiktokService.getAdvertiserInfo(access_token, advertiser_ids[0]);
-          advertiserName = advertiserInfo?.name;
-        } catch (e) {
-          // Continue without advertiser name
-        }
-      }
-
-      await this.tiktokService.saveSession(
-        userId,
-        access_token,
-        refresh_token,
-        advertiser_ids?.[0],
-        advertiserName,
-        tokenExpiresAt,
-        refreshTokenExpiresAt,
-      );
-
+      // Redirect to frontend callback page with the parameters
       const frontendUrl = this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000';
-      return res.redirect(`${frontendUrl}/dashboard?tiktok_connected=true`);
+      const callbackUrl = new URL('/tiktok/callback', frontendUrl);
+      callbackUrl.searchParams.set('auth_code', authorizationCode);
+      callbackUrl.searchParams.set('state', state);
+      
+      return res.redirect(callbackUrl.toString());
     } catch (error: any) {
       const frontendUrl = this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000';
-      return res.redirect(`${frontendUrl}/dashboard?tiktok_error=${encodeURIComponent(error.message)}`);
+      return res.redirect(`${frontendUrl}/tiktok?tiktok_error=${encodeURIComponent(error.message)}`);
     }
   }
 
