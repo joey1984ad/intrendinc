@@ -28,7 +28,7 @@ export class TikTokController {
   async getAuthUrl(@CurrentUser() user: any) {
     const appId = this.configService.get<string>('tiktok.appId');
     const redirectUri = this.configService.get<string>('tiktok.redirectUri');
-    const state = Buffer.from(JSON.stringify({ userId: user.userId })).toString('base64');
+    const state = Buffer.from(JSON.stringify({ userId: user.id })).toString('base64');
 
     const authUrl = `https://business-api.tiktok.com/portal/auth?app_id=${appId}&state=${state}&redirect_uri=${encodeURIComponent(redirectUri!)}&rid=unique_request_id`;
 
@@ -76,7 +76,7 @@ export class TikTokController {
         throw new BadRequestException('Missing authorization code');
       }
 
-      const userId = user.userId;
+      const userId = user.id;
       const appId = this.configService.get<string>('tiktok.appId');
       const appSecret = this.configService.get<string>('tiktok.appSecret');
 
@@ -170,7 +170,7 @@ export class TikTokController {
   @Get('subscription/status')
   @UseGuards(JwtAuthGuard)
   async getSubscriptionStatus(@CurrentUser() user: any) {
-    const status = await this.tiktokService.getSubscriptionStatus(user.userId);
+    const status = await this.tiktokService.getSubscriptionStatus(user.id);
     return {
       success: true,
       ...status,
@@ -180,7 +180,7 @@ export class TikTokController {
   @Get('session')
   @UseGuards(JwtAuthGuard)
   async getSession(@CurrentUser() user: any) {
-    const session = await this.tiktokService.getSession(user.userId);
+    const session = await this.tiktokService.getSession(user.id);
     if (!session) {
       return { success: false, message: 'No TikTok session found' };
     }
@@ -200,14 +200,14 @@ export class TikTokController {
   @Delete('session')
   @UseGuards(JwtAuthGuard)
   async deleteSession(@CurrentUser() user: any) {
-    await this.tiktokService.deleteSession(user.userId);
+    await this.tiktokService.deleteSession(user.id);
     return { success: true, message: 'TikTok session deleted' };
   }
 
   @Post('session/refresh')
   @UseGuards(JwtAuthGuard)
   async refreshToken(@CurrentUser() user: any) {
-    const session = await this.tiktokService.refreshAccessToken(user.userId);
+    const session = await this.tiktokService.refreshAccessToken(user.id);
     return { success: true, expiresAt: session.tokenExpiresAt };
   }
 
@@ -216,7 +216,7 @@ export class TikTokController {
   @Get('advertisers')
   @UseGuards(JwtAuthGuard)
   async getAdvertisers(@CurrentUser() user: any) {
-    const session = await this.tiktokService.getSession(user.userId);
+    const session = await this.tiktokService.getSession(user.id);
     if (!session) {
       throw new BadRequestException('No TikTok session found');
     }
@@ -232,13 +232,13 @@ export class TikTokController {
     @CurrentUser() user: any,
     @Body() body: { advertiserId: string; advertiserName?: string },
   ) {
-    const session = await this.tiktokService.getSession(user.userId);
+    const session = await this.tiktokService.getSession(user.id);
     if (!session) {
       throw new BadRequestException('No TikTok session found');
     }
 
     await this.tiktokService.saveSession(
-      user.userId,
+      user.id,
       session.accessToken,
       session.refreshToken,
       body.advertiserId,
@@ -259,14 +259,14 @@ export class TikTokController {
     @Query('since') since?: string,
     @Query('until') until?: string,
   ) {
-    const session = await this.tiktokService.getSession(user.userId);
+    const session = await this.tiktokService.getSession(user.id);
     if (!session || !session.advertiserId) {
       throw new BadRequestException('No TikTok session or advertiser selected');
     }
 
     // Subscription validation
-    await this.tiktokService.validateSubscription(user.userId);
-    await this.tiktokService.validateAdvertiserAccess(user.userId, session.advertiserId);
+    await this.tiktokService.validateSubscription(user.id);
+    await this.tiktokService.validateAdvertiserAccess(user.id, session.advertiserId);
 
     const dateRange = since && until ? { since, until } : undefined;
     const result = await this.tiktokService.getCampaigns(session.accessToken, session.advertiserId, dateRange);
@@ -276,7 +276,7 @@ export class TikTokController {
   @Get('campaigns/:id')
   @UseGuards(JwtAuthGuard)
   async getCampaign(@CurrentUser() user: any, @Param('id') campaignId: string) {
-    const session = await this.tiktokService.getSession(user.userId);
+    const session = await this.tiktokService.getSession(user.id);
     if (!session) {
       throw new BadRequestException('No TikTok session found');
     }
@@ -295,14 +295,14 @@ export class TikTokController {
     @Query('since') since?: string,
     @Query('until') until?: string,
   ) {
-    const session = await this.tiktokService.getSession(user.userId);
+    const session = await this.tiktokService.getSession(user.id);
     if (!session || !session.advertiserId) {
       throw new BadRequestException('No TikTok session or advertiser selected');
     }
 
     // Subscription validation
-    await this.tiktokService.validateSubscription(user.userId);
-    await this.tiktokService.validateAdvertiserAccess(user.userId, session.advertiserId);
+    await this.tiktokService.validateSubscription(user.id);
+    await this.tiktokService.validateAdvertiserAccess(user.id, session.advertiserId);
 
     const dateRange = since && until ? { since, until } : undefined;
     const result = await this.tiktokService.getAdGroups(session.accessToken, session.advertiserId, campaignId, dateRange);
@@ -312,7 +312,7 @@ export class TikTokController {
   @Get('adgroups/:id')
   @UseGuards(JwtAuthGuard)
   async getAdGroup(@CurrentUser() user: any, @Param('id') adGroupId: string) {
-    const session = await this.tiktokService.getSession(user.userId);
+    const session = await this.tiktokService.getSession(user.id);
     if (!session) {
       throw new BadRequestException('No TikTok session found');
     }
@@ -331,14 +331,14 @@ export class TikTokController {
     @Query('since') since?: string,
     @Query('until') until?: string,
   ) {
-    const session = await this.tiktokService.getSession(user.userId);
+    const session = await this.tiktokService.getSession(user.id);
     if (!session || !session.advertiserId) {
       throw new BadRequestException('No TikTok session or advertiser selected');
     }
 
     // Subscription validation
-    await this.tiktokService.validateSubscription(user.userId);
-    await this.tiktokService.validateAdvertiserAccess(user.userId, session.advertiserId);
+    await this.tiktokService.validateSubscription(user.id);
+    await this.tiktokService.validateAdvertiserAccess(user.id, session.advertiserId);
 
     const dateRange = since && until ? { since, until } : undefined;
     const result = await this.tiktokService.getAds(session.accessToken, session.advertiserId, adGroupId, dateRange);
@@ -348,7 +348,7 @@ export class TikTokController {
   @Get('ads/:id')
   @UseGuards(JwtAuthGuard)
   async getAd(@CurrentUser() user: any, @Param('id') adId: string) {
-    const session = await this.tiktokService.getSession(user.userId);
+    const session = await this.tiktokService.getSession(user.id);
     if (!session) {
       throw new BadRequestException('No TikTok session found');
     }
@@ -370,14 +370,14 @@ export class TikTokController {
       throw new BadRequestException('since and until date parameters are required');
     }
 
-    const session = await this.tiktokService.getSession(user.userId);
+    const session = await this.tiktokService.getSession(user.id);
     if (!session || !session.advertiserId) {
       throw new BadRequestException('No TikTok session or advertiser selected');
     }
 
     // Subscription validation
-    await this.tiktokService.validateSubscription(user.userId);
-    await this.tiktokService.validateAdvertiserAccess(user.userId, session.advertiserId);
+    await this.tiktokService.validateSubscription(user.id);
+    await this.tiktokService.validateAdvertiserAccess(user.id, session.advertiserId);
 
     const result = await this.tiktokService.getAccountMetrics(session.accessToken, session.advertiserId, { since, until });
     return result;
@@ -392,14 +392,14 @@ export class TikTokController {
     @Query('since') since?: string,
     @Query('until') until?: string,
   ) {
-    const session = await this.tiktokService.getSession(user.userId);
+    const session = await this.tiktokService.getSession(user.id);
     if (!session || !session.advertiserId) {
       throw new BadRequestException('No TikTok session or advertiser selected');
     }
 
     // Subscription validation
-    await this.tiktokService.validateSubscription(user.userId);
-    await this.tiktokService.validateAdvertiserAccess(user.userId, session.advertiserId);
+    await this.tiktokService.validateSubscription(user.id);
+    await this.tiktokService.validateAdvertiserAccess(user.id, session.advertiserId);
 
     const dateRange = since && until ? { since, until } : undefined;
     const result = await this.tiktokService.getCreatives(session.accessToken, session.advertiserId, dateRange);
@@ -409,7 +409,7 @@ export class TikTokController {
   @Get('creatives/:id')
   @UseGuards(JwtAuthGuard)
   async getCreative(@CurrentUser() user: any, @Param('id') creativeId: string) {
-    const session = await this.tiktokService.getSession(user.userId);
+    const session = await this.tiktokService.getSession(user.id);
     if (!session || !session.advertiserId) {
       throw new BadRequestException('No TikTok session or advertiser selected');
     }
@@ -421,7 +421,7 @@ export class TikTokController {
   @Get('videos/:id')
   @UseGuards(JwtAuthGuard)
   async getVideoInfo(@CurrentUser() user: any, @Param('id') videoId: string) {
-    const session = await this.tiktokService.getSession(user.userId);
+    const session = await this.tiktokService.getSession(user.id);
     if (!session || !session.advertiserId) {
       throw new BadRequestException('No TikTok session or advertiser selected');
     }
@@ -433,7 +433,7 @@ export class TikTokController {
   @Get('images/:id')
   @UseGuards(JwtAuthGuard)
   async getImageInfo(@CurrentUser() user: any, @Param('id') imageId: string) {
-    const session = await this.tiktokService.getSession(user.userId);
+    const session = await this.tiktokService.getSession(user.id);
     if (!session || !session.advertiserId) {
       throw new BadRequestException('No TikTok session or advertiser selected');
     }
