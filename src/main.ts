@@ -23,6 +23,7 @@ async function bootstrap() {
     crossOriginResourcePolicy: { policy: "cross-origin" },
   }));
   
+  
   // Compression
   app.use(compression());
   
