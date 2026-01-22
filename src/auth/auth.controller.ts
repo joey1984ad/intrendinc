@@ -90,9 +90,9 @@ export class AuthController {
       });
       
       // Generate JWT
-      const { access_token } = await this.authService.login(user);
+      const { access_token, user: userData } = await this.authService.login(user);
       
-      // Set cookie
+      // Set cookie (will work if frontend and backend are on same domain)
       res.cookie('session_token', access_token, {
         httpOnly: true,
         secure: process.env.NODE_ENV === 'production',
@@ -101,12 +101,15 @@ export class AuthController {
         path: '/',
       });
       
-      // Redirect to frontend dashboard
+      // Redirect to frontend callback page with token in URL (as backup)
+      // This ensures auth works even when cookie can't be set across different ports
       const frontendUrl = this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000';
-      return res.redirect(`${frontendUrl}/dashboard`);
+      const redirectUrl = `${frontendUrl}/auth/callback?token=${encodeURIComponent(access_token)}`;
+      return res.redirect(redirectUrl);
     } catch (error) {
+      console.error('Google auth callback error:', error);
       const frontendUrl = this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000';
-      return res.redirect(`${frontendUrl}/signup?error=google_auth_failed`);
+      return res.redirect(`${frontendUrl}/login?error=google_auth_failed`);
     }
   }
 }
