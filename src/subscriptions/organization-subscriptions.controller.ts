@@ -38,14 +38,18 @@ export class OrganizationSubscriptionsController {
   async createOrUpdateSubscription(
     @CurrentUser() user: any,
     @Body() body: {
-      adAccounts: Array<{ adAccountId: string; adAccountName: string }>;
+      adAccounts: Array<{ adAccountId: string; adAccountName: string; platform?: string }>;
       planId: string;
       billingCycle: string;
+      platform?: string;
     },
   ) {
     if (!body.adAccounts || !Array.isArray(body.adAccounts) || !body.planId || !body.billingCycle) {
       throw new BadRequestException('adAccounts array, planId, and billingCycle are required');
     }
+
+    // Default platform is 'facebook' for backwards compatibility
+    const defaultPlatform = body.platform || 'facebook';
 
     const existingSubscription = await this.subscriptionsService.getOrganizationSubscription(user.userId);
 
@@ -54,11 +58,14 @@ export class OrganizationSubscriptionsController {
       const addedSeats: any[] = [];
 
       for (const account of body.adAccounts) {
+        // Use account-level platform if specified, otherwise use body-level platform
+        const accountPlatform = account.platform || defaultPlatform;
         const seat = await this.subscriptionsService.addOrganizationSeat(
           existingSubscription.id,
           user.userId,
           account.adAccountId,
           account.adAccountName,
+          accountPlatform,
         );
         addedSeats.push(seat);
       }
