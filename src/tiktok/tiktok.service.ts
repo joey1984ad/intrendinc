@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, LessThan } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
-import { Inject, forwardRef, ForbiddenException } from '@nestjs/common';
+import { Inject, forwardRef, ForbiddenException, UnauthorizedException } from '@nestjs/common';
 import { TikTokSession } from './entities/tiktok-session.entity';
 import { TikTokMetricsCache } from './entities/tiktok-metrics-cache.entity';
 import { TikTokCreativesCache } from './entities/tiktok-creatives-cache.entity';
@@ -210,7 +210,11 @@ export class TikTokService {
   async refreshAccessToken(userId: number): Promise<TikTokSession> {
     const session = await this.getSession(userId);
     if (!session || !session.refreshToken) {
-      throw new Error('No session or refresh token found');
+      if (session) {
+        this.logger.warn(`Invalid session found for user ${userId}, cleaning up`);
+        await this.deleteSession(userId);
+      }
+      throw new UnauthorizedException('No session or refresh token found');
     }
 
     const appId = this.configService.get<string>('tiktok.appId');
@@ -229,7 +233,9 @@ export class TikTokService {
     const data: TikTokApiResponse = await response.json();
     
     if (data.code !== 0) {
-      throw new Error(`Token refresh failed: ${data.message}`);
+      this.logger.warn(`Token refresh failed for user ${userId}: ${data.message} (Code: ${data.code}), cleaning up session`);
+      await this.deleteSession(userId);
+      throw new UnauthorizedException(`Token refresh failed: ${data.message}`);
     }
 
     const tokenExpiresAt = new Date(Date.now() + data.data.expires_in * 1000);
