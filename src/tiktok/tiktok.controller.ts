@@ -441,4 +441,79 @@ export class TikTokController {
     const image = await this.tiktokService.getImageInfo(session.accessToken, session.advertiserId, imageId);
     return { success: true, image };
   }
+
+  // ==================== DEMOGRAPHICS ====================
+
+  @Get('demographics')
+  @UseGuards(JwtAuthGuard)
+  async getDemographics(
+    @CurrentUser() user: any,
+    @Query('since') since: string,
+    @Query('until') until: string,
+  ) {
+    if (!since || !until) {
+      throw new BadRequestException('since and until date parameters are required');
+    }
+
+    const session = await this.tiktokService.getSession(user.id);
+    if (!session || !session.advertiserId) {
+      throw new BadRequestException('No TikTok session or advertiser selected');
+    }
+
+    // Subscription validation
+    await this.tiktokService.validateSubscription(user.id);
+    await this.tiktokService.validateAdvertiserAccess(user.id, session.advertiserId);
+
+    const result = await this.tiktokService.getDemographics(session.accessToken, session.advertiserId, { since, until });
+    return result;
+  }
+
+  // ==================== TIME SERIES METRICS ====================
+
+  @Get('metrics/daily')
+  @UseGuards(JwtAuthGuard)
+  async getDailyMetrics(
+    @CurrentUser() user: any,
+    @Query('since') since: string,
+    @Query('until') until: string,
+  ) {
+    if (!since || !until) {
+      throw new BadRequestException('since and until date parameters are required');
+    }
+
+    const session = await this.tiktokService.getSession(user.id);
+    if (!session || !session.advertiserId) {
+      throw new BadRequestException('No TikTok session or advertiser selected');
+    }
+
+    // Subscription validation
+    await this.tiktokService.validateSubscription(user.id);
+    await this.tiktokService.validateAdvertiserAccess(user.id, session.advertiserId);
+
+    const result = await this.tiktokService.getDailyMetrics(session.accessToken, session.advertiserId, { since, until });
+    return result;
+  }
+
+  // ==================== CREATIVES WITH METRICS ====================
+
+  @Get('creatives-with-metrics')
+  @UseGuards(JwtAuthGuard)
+  async getCreativesWithMetrics(
+    @CurrentUser() user: any,
+    @Query('since') since?: string,
+    @Query('until') until?: string,
+  ) {
+    const session = await this.tiktokService.getSession(user.id);
+    if (!session || !session.advertiserId) {
+      throw new BadRequestException('No TikTok session or advertiser selected');
+    }
+
+    // Subscription validation
+    await this.tiktokService.validateSubscription(user.id);
+    await this.tiktokService.validateAdvertiserAccess(user.id, session.advertiserId);
+
+    const dateRange = since && until ? { since, until } : undefined;
+    const result = await this.tiktokService.getCreativesWithMetrics(session.accessToken, session.advertiserId, dateRange);
+    return result;
+  }
 }

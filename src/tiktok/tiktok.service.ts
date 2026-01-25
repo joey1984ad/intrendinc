@@ -712,6 +712,252 @@ export class TikTokService {
     return response.data.list?.[0] || null;
   }
 
+  // ==================== DEMOGRAPHICS ====================
+
+  async getDemographics(
+    accessToken: string,
+    advertiserId: string,
+    dateRange: PlatformDateRange,
+  ): Promise<PlatformApiResponse<any>> {
+    try {
+      // Get age breakdown
+      const ageUrl = `${this.baseUrl}/${this.apiVersion}/report/integrated/get/`;
+      const ageResponse = await this.makeApiCall<TikTokApiResponse<{ list: any[] }>>(
+        ageUrl,
+        accessToken,
+        {
+          advertiser_id: advertiserId,
+          report_type: 'AUDIENCE',
+          dimensions: JSON.stringify(['age']),
+          data_level: 'AUCTION_ADVERTISER',
+          start_date: dateRange.since,
+          end_date: dateRange.until,
+          metrics: JSON.stringify([
+            'spend', 'impressions', 'clicks', 'cpc', 'cpm', 'ctr', 'conversion', 'cost_per_conversion',
+          ]),
+        },
+      );
+
+      // Get gender breakdown
+      const genderResponse = await this.makeApiCall<TikTokApiResponse<{ list: any[] }>>(
+        ageUrl,
+        accessToken,
+        {
+          advertiser_id: advertiserId,
+          report_type: 'AUDIENCE',
+          dimensions: JSON.stringify(['gender']),
+          data_level: 'AUCTION_ADVERTISER',
+          start_date: dateRange.since,
+          end_date: dateRange.until,
+          metrics: JSON.stringify([
+            'spend', 'impressions', 'clicks', 'cpc', 'cpm', 'ctr', 'conversion', 'cost_per_conversion',
+          ]),
+        },
+      );
+
+      // Get platform/device breakdown
+      const platformResponse = await this.makeApiCall<TikTokApiResponse<{ list: any[] }>>(
+        ageUrl,
+        accessToken,
+        {
+          advertiser_id: advertiserId,
+          report_type: 'AUDIENCE',
+          dimensions: JSON.stringify(['platform']),
+          data_level: 'AUCTION_ADVERTISER',
+          start_date: dateRange.since,
+          end_date: dateRange.until,
+          metrics: JSON.stringify([
+            'spend', 'impressions', 'clicks', 'cpc', 'cpm', 'ctr', 'conversion', 'cost_per_conversion',
+          ]),
+        },
+      );
+
+      const demographics = {
+        byAge: this.transformDemographicData(ageResponse.data?.list || [], 'age'),
+        byGender: this.transformDemographicData(genderResponse.data?.list || [], 'gender'),
+        byPlatform: this.transformDemographicData(platformResponse.data?.list || [], 'platform'),
+      };
+
+      return { success: true, data: demographics };
+    } catch (error: any) {
+      this.logger.error('Failed to get demographics', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  private transformDemographicData(data: any[], dimensionKey: string): any[] {
+    return data.map(item => ({
+      [dimensionKey]: item.dimensions?.[dimensionKey] || 'Unknown',
+      impressions: parseFloat(item.metrics?.impressions) || 0,
+      clicks: parseFloat(item.metrics?.clicks) || 0,
+      spend: parseFloat(item.metrics?.spend) || 0,
+      ctr: parseFloat(item.metrics?.ctr) || 0,
+      cpc: parseFloat(item.metrics?.cpc) || 0,
+      conversions: parseFloat(item.metrics?.conversion) || 0,
+      costPerConversion: parseFloat(item.metrics?.cost_per_conversion) || 0,
+    }));
+  }
+
+  // ==================== DAILY METRICS ====================
+
+  async getDailyMetrics(
+    accessToken: string,
+    advertiserId: string,
+    dateRange: PlatformDateRange,
+  ): Promise<PlatformApiResponse<any[]>> {
+    try {
+      const url = `${this.baseUrl}/${this.apiVersion}/report/integrated/get/`;
+      const response = await this.makeApiCall<TikTokApiResponse<{ list: TikTokMetricsApiData[] }>>(
+        url,
+        accessToken,
+        {
+          advertiser_id: advertiserId,
+          report_type: 'BASIC',
+          dimensions: JSON.stringify(['stat_time_day']),
+          data_level: 'AUCTION_ADVERTISER',
+          start_date: dateRange.since,
+          end_date: dateRange.until,
+          metrics: JSON.stringify([
+            'spend', 'impressions', 'clicks', 'reach', 'frequency',
+            'cpc', 'cpm', 'ctr', 'conversion', 'cost_per_conversion',
+          ]),
+        },
+      );
+
+      if (response.code !== 0) {
+        return { success: false, error: response.message };
+      }
+
+      const dailyMetrics = response.data.list?.map(item => ({
+        date: item.dimensions?.stat_time_day,
+        ...this.transformMetrics(item.metrics),
+      })).sort((a, b) => a.date?.localeCompare(b.date || '') || 0);
+
+      return { success: true, data: dailyMetrics || [] };
+    } catch (error: any) {
+      this.logger.error('Failed to get daily metrics', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  // ==================== CREATIVES WITH METRICS ====================
+
+  async getCreativesWithMetrics(
+    accessToken: string,
+    advertiserId: string,
+    dateRange?: PlatformDateRange,
+  ): Promise<PlatformApiResponse<any[]>> {
+    try {
+      // First, get all ads with creative info
+      const adsResult = await this.getAds(accessToken, advertiserId, undefined, dateRange);
+      
+      if (!adsResult.success || !adsResult.data) {
+        return { success: false, error: adsResult.error || 'Failed to fetch ads' };
+      }
+
+      // Get ad-level metrics
+      const effectiveDateRange = dateRange || {
+        since: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+        until: new Date().toISOString().split('T')[0],
+      };
+
+      const metricsUrl = `${this.baseUrl}/${this.apiVersion}/report/integrated/get/`;
+      const adIds = adsResult.data.map(ad => ad.id);
+      
+      let adMetrics: Record<string, any> = {};
+      
+      if (adIds.length > 0) {
+        const metricsResponse = await this.makeApiCall<TikTokApiResponse<{ list: TikTokMetricsApiData[] }>>(
+          metricsUrl,
+          accessToken,
+          {
+            advertiser_id: advertiserId,
+            report_type: 'BASIC',
+            dimensions: JSON.stringify(['ad_id']),
+            data_level: 'AUCTION_AD',
+            start_date: effectiveDateRange.since,
+            end_date: effectiveDateRange.until,
+            filtering: JSON.stringify({ ad_ids: adIds }),
+            metrics: JSON.stringify([
+              'spend', 'impressions', 'clicks', 'reach', 'frequency',
+              'cpc', 'cpm', 'ctr', 'conversion', 'cost_per_conversion',
+            ]),
+          },
+        );
+
+        if (metricsResponse.code === 0 && metricsResponse.data?.list) {
+          metricsResponse.data.list.forEach(item => {
+            const adId = item.dimensions?.ad_id;
+            if (adId) {
+              adMetrics[adId] = this.transformMetrics(item.metrics);
+            }
+          });
+        }
+      }
+
+      // Combine ads with their metrics and fetch creative details
+      const creativesWithMetrics = await Promise.all(
+        adsResult.data.map(async (ad) => {
+          let creativeDetails: any = null;
+          let videoInfo: any = null;
+          let imageInfo: any = null;
+
+          // Try to get creative details if creativeId exists
+          if (ad.creativeId) {
+            try {
+              creativeDetails = await this.getCreativeInfo(accessToken, advertiserId, ad.creativeId);
+              
+              // Get video or image info based on creative type
+              if (creativeDetails?.video_id) {
+                videoInfo = await this.getVideoInfo(accessToken, advertiserId, creativeDetails.video_id);
+              }
+              if (creativeDetails?.image_ids?.[0]) {
+                imageInfo = await this.getImageInfo(accessToken, advertiserId, creativeDetails.image_ids[0]);
+              }
+            } catch (e) {
+              // Continue without creative details
+            }
+          }
+
+          return {
+            id: ad.id,
+            adId: ad.id,
+            name: ad.name,
+            status: ad.status,
+            creativeId: ad.creativeId,
+            creativeType: videoInfo ? 'video' : 'image',
+            thumbnailUrl: videoInfo?.poster_url || imageInfo?.url || creativeDetails?.thumbnail_url,
+            videoUrl: videoInfo?.video_url,
+            imageUrl: imageInfo?.url,
+            adText: creativeDetails?.ad_text,
+            callToAction: creativeDetails?.call_to_action,
+            metrics: adMetrics[ad.id] || {
+              impressions: 0,
+              clicks: 0,
+              spend: 0,
+              cpc: 0,
+              cpm: 0,
+              ctr: 0,
+              conversions: 0,
+            },
+          };
+        }),
+      );
+
+      return {
+        success: true,
+        data: creativesWithMetrics,
+        pagination: {
+          totalCount: creativesWithMetrics.length,
+          hasMore: false,
+        },
+      };
+    } catch (error: any) {
+      this.logger.error('Failed to get creatives with metrics', error);
+      return { success: false, error: error.message };
+    }
+  }
+
   // ==================== CACHING ====================
 
   private async getCachedMetrics(
