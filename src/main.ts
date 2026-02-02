@@ -10,41 +10,55 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
     rawBody: true,
   });
-  
+
   // Set global prefix
   app.setGlobalPrefix('api');
 
-    // CORS
+  // CORS
   app.enableCors({
     // origin: process.env.FRONTEND_URL || 'http://localhost:3000',
-    origin: ['http://localhost:3000', 'https://itsintrend.com', 'https://www.itsintrend.com', 'https://gpthumanize.pro', 'https://www.gpthumanize.pro'],
+    origin: [
+      'http://localhost:3000',
+      'https://localhost:3000',
+      'https://itsintrend.com',
+      'https://www.itsintrend.com',
+      'https://gpthumanize.pro',
+      'https://www.gpthumanize.pro',
+    ],
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-Requested-With',
+      'Accept',
+      'Origin',
+    ],
   });
   // Security
-  app.use(helmet({
-    crossOriginResourcePolicy: { policy: "cross-origin" },
-  }));
-  
-  
+  app.use(
+    helmet({
+      crossOriginResourcePolicy: { policy: 'cross-origin' },
+    }),
+  );
+
   // Compression
   app.use(compression());
-  
+
   // Cookies
   app.use(cookieParser());
-  
-  // Validation
-  app.useGlobalPipes(new ValidationPipe({
-    whitelist: true,
-    transform: true,
-    forbidNonWhitelisted: true,
-    transformOptions: {
-      enableImplicitConversion: true,
-    },
-  }));
-  
 
+  // Validation
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      transform: true,
+      forbidNonWhitelisted: true,
+      transformOptions: {
+        enableImplicitConversion: true,
+      },
+    }),
+  );
 
   // Swagger API Documentation
   if (process.env.NODE_ENV !== 'production') {
@@ -65,4 +79,3 @@ async function bootstrap() {
   console.log(`API Docs: http://localhost:${port}/docs`);
 }
 bootstrap();
-
