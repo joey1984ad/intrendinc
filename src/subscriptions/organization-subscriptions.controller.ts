@@ -1,14 +1,28 @@
-import { Controller, Get, Post, Put, Delete, Body, Query, UseGuards, BadRequestException } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Put,
+  Delete,
+  Body,
+  Query,
+  UseGuards,
+  BadRequestException,
+} from '@nestjs/common';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { StripeService } from '../stripe/stripe.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { ConfigService } from '@nestjs/config';
+import { UsersService } from '../users/users.service';
 
 @Controller('organization-subscriptions')
 export class OrganizationSubscriptionsController {
   constructor(
     private readonly subscriptionsService: SubscriptionsService,
     private readonly stripeService: StripeService,
+    private readonly configService: ConfigService,
+    private readonly usersService: UsersService,
   ) {}
 
   // GET - Retrieve organization subscription and seats
@@ -18,11 +32,17 @@ export class OrganizationSubscriptionsController {
     @CurrentUser() user: any,
     @Query('includeHistory') includeHistory?: string,
   ) {
-    const subscription = await this.subscriptionsService.getOrganizationSubscription(user.userId);
-    const seats = await this.subscriptionsService.getOrganizationSeats(user.userId);
-    const billingHistory = includeHistory === 'true'
-      ? await this.subscriptionsService.getOrganizationBillingHistory(user.userId)
-      : [];
+    const subscription =
+      await this.subscriptionsService.getOrganizationSubscription(user.userId);
+    const seats = await this.subscriptionsService.getOrganizationSeats(
+      user.userId,
+    );
+    const billingHistory =
+      includeHistory === 'true'
+        ? await this.subscriptionsService.getOrganizationBillingHistory(
+            user.userId,
+          )
+        : [];
 
     return {
       success: true,
@@ -37,21 +57,34 @@ export class OrganizationSubscriptionsController {
   @UseGuards(JwtAuthGuard)
   async createOrUpdateSubscription(
     @CurrentUser() user: any,
-    @Body() body: {
-      adAccounts: Array<{ adAccountId: string; adAccountName: string; platform?: string }>;
+    @Body()
+    body: {
+      adAccounts: Array<{
+        adAccountId: string;
+        adAccountName: string;
+        platform?: string;
+      }>;
       planId: string;
       billingCycle: string;
       platform?: string;
     },
   ) {
-    if (!body.adAccounts || !Array.isArray(body.adAccounts) || !body.planId || !body.billingCycle) {
-      throw new BadRequestException('adAccounts array, planId, and billingCycle are required');
+    if (
+      !body.adAccounts ||
+      !Array.isArray(body.adAccounts) ||
+      !body.planId ||
+      !body.billingCycle
+    ) {
+      throw new BadRequestException(
+        'adAccounts array, planId, and billingCycle are required',
+      );
     }
 
     // Default platform is 'facebook' for backwards compatibility
     const defaultPlatform = body.platform || 'facebook';
 
-    const existingSubscription = await this.subscriptionsService.getOrganizationSubscription(user.userId);
+    const existingSubscription =
+      await this.subscriptionsService.getOrganizationSubscription(user.userId);
 
     if (existingSubscription) {
       // Add seats to existing subscription
@@ -71,14 +104,19 @@ export class OrganizationSubscriptionsController {
       }
 
       // Update quantity
-      const allSeats = await this.subscriptionsService.getOrganizationSeats(user.userId);
+      const allSeats = await this.subscriptionsService.getOrganizationSeats(
+        user.userId,
+      );
       await this.subscriptionsService.updateOrganizationSubscriptionQuantity(
         existingSubscription.id,
         allSeats.length,
       );
 
       // Update Stripe if not trial
-      if (existingSubscription.stripeSubscriptionId && !existingSubscription.stripeSubscriptionId.startsWith('trial_')) {
+      if (
+        existingSubscription.stripeSubscriptionId &&
+        !existingSubscription.stripeSubscriptionId.startsWith('trial_')
+      ) {
         try {
           await this.stripeService.updateSubscriptionQuantity(
             existingSubscription.stripeSubscriptionId,
@@ -98,11 +136,99 @@ export class OrganizationSubscriptionsController {
       };
     }
 
-    // No existing subscription - return info for checkout
+    // No existing subscription - create a checkout session
+    const frontendUrl =
+      this.configService.get<string>('FRONTEND_URL') ||
+      'https://localhost:3000';
+
+    // Get the user details
+    const userDetails = await this.usersService.findOne(user.userId);
+    if (!userDetails) {
+      throw new BadRequestException('User not found');
+    }
+
+    // Get or create Stripe customer
+    let stripeCustomer = await this.subscriptionsService.getStripeCustomer(
+      user.userId,
+    );
+    let customerId = stripeCustomer?.stripeCustomerId;
+
+    if (!customerId) {
+      const name =
+        `${userDetails.firstName || ''} ${userDetails.lastName || ''}`.trim();
+      const customer = await this.stripeService.createCustomer(
+        userDetails.email,
+        name,
+      );
+      customerId = customer.id;
+      await this.subscriptionsService.createStripeCustomer(
+        user.userId,
+        customerId,
+        userDetails.email,
+      );
+    }
+
+    // Determine the price ID based on planId and billingCycle
+    let priceId: string | undefined;
+    const planKey = body.planId.toLowerCase();
+    const cycleKey = body.billingCycle.toLowerCase();
+
+    if (planKey.includes('basic') || planKey.includes('starter')) {
+      priceId =
+        cycleKey === 'annual'
+          ? this.configService.get<string>(
+              'stripe.organizationBasicAnnualPriceId',
+            )
+          : this.configService.get<string>(
+              'stripe.organizationBasicMonthlyPriceId',
+            );
+    } else if (planKey.includes('pro')) {
+      priceId =
+        cycleKey === 'annual'
+          ? this.configService.get<string>(
+              'stripe.organizationProAnnualPriceId',
+            )
+          : this.configService.get<string>(
+              'stripe.organizationProMonthlyPriceId',
+            );
+    }
+
+    if (!priceId) {
+      throw new BadRequestException(
+        `Invalid plan or billing cycle: ${body.planId} / ${body.billingCycle}`,
+      );
+    }
+
+    // Create checkout session
+    const adAccountIds = body.adAccounts.map((acc) => acc.adAccountId);
+    const adAccountNames = body.adAccounts.map((acc) => acc.adAccountName);
+
+    const session = await this.stripeService.createCheckoutSession({
+      customerId,
+      priceId,
+      quantity: body.adAccounts.length,
+      successUrl: `${frontendUrl}/accounts?checkout=success`,
+      cancelUrl: `${frontendUrl}/accounts?checkout=canceled`,
+      mode: 'subscription',
+      metadata: {
+        userId: user.userId.toString(),
+        type: 'organization',
+        planId: body.planId,
+        planName: body.planId,
+        billingCycle: body.billingCycle,
+        quantity: body.adAccounts.length.toString(),
+        platform: defaultPlatform,
+        adAccountIds: JSON.stringify(adAccountIds),
+        adAccountNames: JSON.stringify(adAccountNames),
+      },
+    });
+
     return {
-      success: false,
+      success: true,
       requiresCheckout: true,
-      message: 'No active subscription. Please complete checkout first.',
+      checkoutUrl: session.url,
+      sessionId: session.id,
+      message: 'Redirecting to checkout...',
     };
   }
 
@@ -111,16 +237,20 @@ export class OrganizationSubscriptionsController {
   @UseGuards(JwtAuthGuard)
   async updateSubscription(
     @CurrentUser() user: any,
-    @Body() body: {
+    @Body()
+    body: {
       planId: string;
       billingCycle: string;
       quantity?: number;
     },
   ) {
-    const subscription = await this.subscriptionsService.getOrganizationSubscription(user.userId);
+    const subscription =
+      await this.subscriptionsService.getOrganizationSubscription(user.userId);
 
     if (!subscription) {
-      throw new BadRequestException('No active organization subscription found');
+      throw new BadRequestException(
+        'No active organization subscription found',
+      );
     }
 
     // Update in database
@@ -142,25 +272,34 @@ export class OrganizationSubscriptionsController {
     @CurrentUser() user: any,
     @Query('seatId') seatId?: string,
   ) {
-    const subscription = await this.subscriptionsService.getOrganizationSubscription(user.userId);
+    const subscription =
+      await this.subscriptionsService.getOrganizationSubscription(user.userId);
 
     if (!subscription) {
-      throw new BadRequestException('No active organization subscription found');
+      throw new BadRequestException(
+        'No active organization subscription found',
+      );
     }
 
     if (seatId) {
       // Remove specific seat
-      await this.subscriptionsService.deactivateOrganizationSeat(parseInt(seatId));
+      await this.subscriptionsService.deactivateOrganizationSeat(
+        parseInt(seatId),
+      );
 
       // Update quantities
-      const remainingSeats = await this.subscriptionsService.getOrganizationSeats(user.userId);
+      const remainingSeats =
+        await this.subscriptionsService.getOrganizationSeats(user.userId);
       await this.subscriptionsService.updateOrganizationSubscriptionQuantity(
         subscription.id,
         remainingSeats.length,
       );
 
       // Update Stripe
-      if (subscription.stripeSubscriptionId && !subscription.stripeSubscriptionId.startsWith('trial_')) {
+      if (
+        subscription.stripeSubscriptionId &&
+        !subscription.stripeSubscriptionId.startsWith('trial_')
+      ) {
         try {
           await this.stripeService.updateSubscriptionQuantity(
             subscription.stripeSubscriptionId,
@@ -179,15 +318,23 @@ export class OrganizationSubscriptionsController {
     }
 
     // Cancel entire subscription
-    if (subscription.stripeSubscriptionId && !subscription.stripeSubscriptionId.startsWith('trial_')) {
+    if (
+      subscription.stripeSubscriptionId &&
+      !subscription.stripeSubscriptionId.startsWith('trial_')
+    ) {
       try {
-        await this.stripeService.cancelSubscription(subscription.stripeSubscriptionId);
+        await this.stripeService.cancelSubscription(
+          subscription.stripeSubscriptionId,
+        );
       } catch (error) {
         // Log but continue with local cancellation
       }
     }
 
-    await this.subscriptionsService.updateOrganizationSubscriptionStatus(subscription.id, 'canceled');
+    await this.subscriptionsService.updateOrganizationSubscriptionStatus(
+      subscription.id,
+      'canceled',
+    );
 
     return {
       success: true,

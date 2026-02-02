@@ -16,13 +16,16 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         },
       ]),
       ignoreExpiration: false,
-      secretOrKey: configService.get<string>('auth.jwtSecret') || 'your-secret-key-change-in-production',
+      secretOrKey:
+        configService.get<string>('auth.jwtSecret') ||
+        'your-secret-key-change-in-production',
     });
   }
 
   async validate(payload: any) {
-    return { 
-      id: payload.userId, 
+    return {
+      userId: payload.userId || payload.id,
+      id: payload.userId || payload.id,
       email: payload.email,
       name: payload.name,
       provider: payload.provider,

@@ -16,6 +16,7 @@ import { OrganizationBillingHistory } from './entities/organization-billing-hist
 import { PlatformSubscription } from './entities/platform-subscription.entity';
 import { PlatformSeat } from './entities/platform-seat.entity';
 import { StripeModule } from '../stripe/stripe.module';
+import { UsersModule } from '../users/users.module';
 
 @Module({
   imports: [
@@ -31,11 +32,15 @@ import { StripeModule } from '../stripe/stripe.module';
       PlatformSeat,
     ]),
     forwardRef(() => StripeModule),
+    forwardRef(() => UsersModule),
   ],
-  controllers: [SubscriptionsController, OrganizationSubscriptionsController, PaidAccountsController, PlatformSubscriptionsController],
+  controllers: [
+    SubscriptionsController,
+    OrganizationSubscriptionsController,
+    PaidAccountsController,
+    PlatformSubscriptionsController,
+  ],
   providers: [SubscriptionsService, PlatformSubscriptionsService],
   exports: [SubscriptionsService, PlatformSubscriptionsService],
 })
 export class SubscriptionsModule {}
-
-

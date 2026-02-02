@@ -1,4 +1,14 @@
-import { Controller, Get, Post, Delete, Body, Query, Param, UseGuards, BadRequestException } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Delete,
+  Body,
+  Query,
+  Param,
+  UseGuards,
+  BadRequestException,
+} from '@nestjs/common';
 import { FacebookService } from './facebook.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -9,8 +19,8 @@ export class FacebookController {
 
   @Get('health')
   async healthCheck() {
-    return { 
-      status: 'ok', 
+    return {
+      status: 'ok',
       service: 'facebook',
       timestamp: new Date().toISOString(),
     };
@@ -22,17 +32,23 @@ export class FacebookController {
   async getSession(@CurrentUser() user: any) {
     const session = await this.facebookService.getFacebookSession(user.userId);
     if (!session) {
-      return { success: false, message: 'No Facebook session found' };
+      return {
+        success: false,
+        hasSession: false,
+        message: 'No Facebook session found',
+      };
     }
-    return { 
-      success: true, 
+    return {
+      success: true,
+      hasSession: true,
       session: {
         id: session.id,
         userId: session.userId,
         adAccountId: session.adAccountId,
         tokenExpiresAt: session.tokenExpiresAt,
+        accessToken: session.accessToken,
         hasToken: !!session.accessToken,
-      }
+      },
     };
   }
 
@@ -40,17 +56,24 @@ export class FacebookController {
   @UseGuards(JwtAuthGuard)
   async saveSession(
     @CurrentUser() user: any,
-    @Body() body: { accessToken: string; adAccountId?: string; tokenExpiresAt?: string },
+    @Body()
+    body: {
+      accessToken: string;
+      adAccountId?: string;
+      tokenExpiresAt?: string;
+    },
   ) {
-    const expiresAt = body.tokenExpiresAt ? new Date(body.tokenExpiresAt) : undefined;
+    const expiresAt = body.tokenExpiresAt
+      ? new Date(body.tokenExpiresAt)
+      : undefined;
     const session = await this.facebookService.saveFacebookSession(
       user.userId,
       body.accessToken,
       body.adAccountId,
       expiresAt,
     );
-    return { 
-      success: true, 
+    return {
+      success: true,
       sessionId: session.id,
       message: 'Facebook session saved successfully',
     };
@@ -69,9 +92,8 @@ export class FacebookController {
 
     try {
       // Exchange for long-lived token
-      const { accessToken, expiresIn } = await this.facebookService.exchangeForLongLivedToken(
-        body.accessToken,
-      );
+      const { accessToken, expiresIn } =
+        await this.facebookService.exchangeForLongLivedToken(body.accessToken);
 
       const expiresAt = new Date(Date.now() + expiresIn * 1000);
 
@@ -111,7 +133,9 @@ export class FacebookController {
       return { success: false, error: 'No Facebook session found' };
     }
 
-    const adAccounts = await this.facebookService.getAdAccounts(session.accessToken);
+    const adAccounts = await this.facebookService.getAdAccounts(
+      session.accessToken,
+    );
     return { success: true, adAccounts };
   }
 
@@ -132,7 +156,11 @@ export class FacebookController {
       return { success: false, error: 'No Facebook session found' };
     }
 
-    const result = await this.facebookService.getAds(adAccountId, session.accessToken, dateRange);
+    const result = await this.facebookService.getAds(
+      adAccountId,
+      session.accessToken,
+      dateRange,
+    );
     return { success: true, ...result };
   }
 
@@ -153,7 +181,11 @@ export class FacebookController {
       return { success: false, error: 'No Facebook session found' };
     }
 
-    const insights = await this.facebookService.getInsights(adAccountId, session.accessToken, dateRange);
+    const insights = await this.facebookService.getInsights(
+      adAccountId,
+      session.accessToken,
+      dateRange,
+    );
     return { success: true, insights };
   }
 
@@ -173,7 +205,10 @@ export class FacebookController {
       return { success: false, error: 'No Facebook session found' };
     }
 
-    const creatives = await this.facebookService.getCreatives(adAccountId, session.accessToken);
+    const creatives = await this.facebookService.getCreatives(
+      adAccountId,
+      session.accessToken,
+    );
     return { success: true, creatives };
   }
 
@@ -213,17 +248,21 @@ export class FacebookController {
     if (!session) {
       return { success: false, error: 'No Facebook session found' };
     }
-    const campaigns = await this.facebookService.getCampaignData(session.id, dateRange);
+    const campaigns = await this.facebookService.getCampaignData(
+      session.id,
+      dateRange,
+    );
     return { success: true, campaigns };
   }
 
   // Cache management
   @Post('cache/clear')
   @UseGuards(JwtAuthGuard)
-  async clearCache(
-    @Body() body: { adAccountId?: string; dateRange?: string },
-  ) {
-    await this.facebookService.clearCreativesCache(body.adAccountId, body.dateRange);
+  async clearCache(@Body() body: { adAccountId?: string; dateRange?: string }) {
+    await this.facebookService.clearCreativesCache(
+      body.adAccountId,
+      body.dateRange,
+    );
     return { success: true, message: 'Cache cleared' };
   }
 
@@ -255,7 +294,8 @@ export class FacebookController {
   @UseGuards(JwtAuthGuard)
   async getAdsets(
     @CurrentUser() user: any,
-    @Body() body: { accessToken?: string; adAccountId: string; dateRange?: string },
+    @Body()
+    body: { accessToken?: string; adAccountId: string; dateRange?: string },
   ) {
     if (!body.adAccountId) {
       throw new BadRequestException('adAccountId is required');
@@ -263,7 +303,9 @@ export class FacebookController {
 
     let accessToken = body.accessToken;
     if (!accessToken) {
-      const session = await this.facebookService.getFacebookSession(user.userId);
+      const session = await this.facebookService.getFacebookSession(
+        user.userId,
+      );
       if (!session) {
         return { success: false, error: 'No Facebook session found' };
       }
@@ -291,7 +333,9 @@ export class FacebookController {
 
     let accessToken = body.accessToken;
     if (!accessToken) {
-      const session = await this.facebookService.getFacebookSession(user.userId);
+      const session = await this.facebookService.getFacebookSession(
+        user.userId,
+      );
       if (!session) {
         return { success: false, error: 'No Facebook session found' };
       }
@@ -341,9 +385,10 @@ export class FacebookController {
       return { success: false, error: 'No Facebook session found' };
     }
 
-    const result = await this.facebookService.getCreativePreview(creativeId, session.accessToken);
+    const result = await this.facebookService.getCreativePreview(
+      creativeId,
+      session.accessToken,
+    );
     return { success: true, creative: result };
   }
 }
-
-
