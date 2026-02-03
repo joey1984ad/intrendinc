@@ -22,7 +22,7 @@ export class FacebookService {
     @InjectRepository(CreativesCache)
     private creativesCacheRepository: Repository<CreativesCache>,
     private configService: ConfigService,
-  ) {}
+  ) { }
 
   // Session Management
   async saveFacebookSession(
@@ -55,10 +55,16 @@ export class FacebookService {
   }
 
   // Facebook Graph API Methods
-  async makeGraphApiCall(endpoint: string, accessToken: string, params?: Record<string, string>): Promise<any> {
-    const url = new URL(`https://graph.facebook.com/${this.graphApiVersion}${endpoint}`);
+  async makeGraphApiCall(
+    endpoint: string,
+    accessToken: string,
+    params?: Record<string, string>,
+  ): Promise<any> {
+    const url = new URL(
+      `https://graph.facebook.com/${this.graphApiVersion}${endpoint}`,
+    );
     url.searchParams.append('access_token', accessToken);
-    
+
     if (params) {
       Object.entries(params).forEach(([key, value]) => {
         url.searchParams.append(key, value);
@@ -67,10 +73,12 @@ export class FacebookService {
 
     try {
       const response = await fetch(url.toString());
-      
+
       if (!response.ok) {
         const error = await response.json();
-        throw new Error(error.error?.message || `Facebook API error: ${response.status}`);
+        throw new Error(
+          error.error?.message || `Facebook API error: ${response.status}`,
+        );
       }
 
       return response.json();
@@ -88,49 +96,229 @@ export class FacebookService {
     return result.data || [];
   }
 
-  async getAds(adAccountId: string, accessToken: string, dateRange: string): Promise<any> {
+  async getAds(
+    adAccountId: string,
+    accessToken: string,
+    dateRange: string,
+  ): Promise<any> {
     const datePreset = this.getDatePreset(dateRange);
-    
-    const result = await this.makeGraphApiCall(`/act_${adAccountId}/ads`, accessToken, {
-      fields: 'id,name,status,creative{id,name,thumbnail_url,object_story_spec},insights.date_preset(' + datePreset + '){impressions,clicks,spend,ctr,cpc,cpm,reach,frequency}',
-      limit: '500',
-    });
+
+    // Request basic ad data without insights to avoid data overload
+    // Insights can be fetched separately per ad if needed
+    const result = await this.makeGraphApiCall(
+      `/act_${adAccountId}/ads`,
+      accessToken,
+      {
+        fields:
+          'id,name,status,adset_id,campaign_id,creative{id,name,thumbnail_url,image_url}',
+        limit: '100', // Reduce limit
+      },
+    );
+
+    // Transform snake_case to camelCase for frontend compatibility
+    const transformedAds = (result.data || []).map((ad: any) => ({
+      ...ad,
+      creative: ad.creative
+        ? {
+          ...ad.creative,
+          thumbnailUrl: ad.creative.thumbnail_url,
+          imageUrl: ad.creative.image_url,
+        }
+        : undefined,
+    }));
 
     return {
-      ads: result.data || [],
+      ads: transformedAds,
       paging: result.paging,
     };
   }
 
-  async getInsights(adAccountId: string, accessToken: string, dateRange: string): Promise<any> {
+  async getInsights(
+    adAccountId: string,
+    accessToken: string,
+    dateRange: string,
+  ): Promise<any> {
     const datePreset = this.getDatePreset(dateRange);
-    
-    const result = await this.makeGraphApiCall(`/act_${adAccountId}/insights`, accessToken, {
-      fields: 'impressions,clicks,spend,ctr,cpc,cpm,reach,frequency,actions,conversions',
-      date_preset: datePreset,
-      level: 'account',
-    });
+
+    const result = await this.makeGraphApiCall(
+      `/act_${adAccountId}/insights`,
+      accessToken,
+      {
+        fields:
+          'impressions,clicks,spend,ctr,cpc,cpm,reach,frequency,actions,conversions',
+        date_preset: datePreset,
+        level: 'account',
+      },
+    );
 
     return result.data?.[0] || {};
   }
 
-  async getCreatives(adAccountId: string, accessToken: string): Promise<any[]> {
-    const result = await this.makeGraphApiCall(`/act_${adAccountId}/adcreatives`, accessToken, {
-      fields: 'id,name,title,body,thumbnail_url,image_url,object_story_spec,effective_object_story_id',
-      limit: '200',
-    });
+  async getCreatives(
+    adAccountId: string,
+    accessToken: string,
+    dateRange: string = 'last_30d',
+  ): Promise<any[]> {
+    const datePreset = this.getDatePreset(dateRange);
 
-    return result.data || [];
+    // Fetch ads with creative details and insights
+    // We use ads endpoint to get creative usage context (campaign, adset) and performance
+    const result = await this.makeGraphApiCall(
+      `/act_${adAccountId}/ads`,
+      accessToken,
+      {
+        fields: [
+          'id',
+          'name',
+          'status',
+          'creative{id,name,thumbnail_url,image_url,object_story_spec,asset_feed_spec,video_id}',
+          'campaign{name}',
+          'adset{name}',
+          `insights.date_preset(${datePreset}){spend,clicks,impressions,ctr,cpc,actions,action_values,reach,frequency}`,
+        ].join(','),
+        limit: '500',
+      },
+    );
+
+    const ads = result.data || [];
+    const creativeMap = new Map<string, any>();
+
+    for (const ad of ads) {
+      if (!ad.creative) continue;
+
+      const creativeId = ad.creative.id;
+      // Insights is usually an array, take the first element provided by date_preset
+      const insights = ad.insights?.data?.[0] || {};
+
+      const spend = parseFloat(insights.spend || 0);
+      const clicks = parseInt(insights.clicks || 0);
+      const impressions = parseInt(insights.impressions || 0);
+      const reach = parseInt(insights.reach || 0);
+      const frequency = parseFloat(insights.frequency || 0);
+
+      // Calculate Return (Purchase Value)
+      let purchaseValue = 0;
+      const actionValues = insights.action_values || [];
+      if (Array.isArray(actionValues)) {
+        const purchase = actionValues.find(
+          (a: any) =>
+            a.action_type === 'purchase' ||
+            a.action_type === 'offsite_conversion.fb_pixel_purchase' ||
+            a.action_type === 'omni_purchase',
+        );
+        if (purchase) purchaseValue = parseFloat(purchase.value);
+      }
+
+      if (!creativeMap.has(creativeId)) {
+        // Determine type
+        let creativeType = 'image';
+        if (ad.creative.video_id || ad.creative.object_story_spec?.video_data) {
+          creativeType = 'video';
+        } else if (
+          ad.creative.object_story_spec?.link_data?.child_attachments
+        ) {
+          creativeType = 'carousel';
+        } else if (ad.creative.asset_feed_spec) {
+          creativeType = 'dynamic';
+        }
+
+        creativeMap.set(creativeId, {
+          id: creativeId, // Keep as string to preserve precision and match API
+          name: ad.creative.name || ad.name,
+          thumbnailUrl: ad.creative.thumbnail_url || ad.creative.image_url,
+          imageUrl: ad.creative.image_url || ad.creative.thumbnail_url,
+          creativeType,
+          campaignName: ad.campaign?.name || 'Unknown Campaign',
+          adsetName: ad.adset?.name || 'Unknown Ad Set',
+          // Metrics aggregation
+          spend: 0,
+          clicks: 0,
+          impressions: 0,
+          reach: 0,
+          maxFrequency: 0,
+          purchaseValue: 0,
+          adCount: 0,
+        });
+      }
+
+      const creative = creativeMap.get(creativeId);
+      creative.spend += spend;
+      creative.clicks += clicks;
+      creative.impressions += impressions;
+      // Reach cannot be simply summed, but we use approximation or max?
+      // Summing reach is very wrong, but taking max is also wrong.
+      // Let's sum it for now as a rough "gross reach" or leave it.
+      creative.reach += reach;
+      creative.maxFrequency = Math.max(creative.maxFrequency, frequency);
+      creative.purchaseValue += purchaseValue;
+      creative.adCount += 1;
+
+      // Update names if "Unknown" and we found better info
+      if (creative.campaignName === 'Unknown Campaign' && ad.campaign?.name) {
+        creative.campaignName = ad.campaign.name;
+      }
+      if (creative.adsetName === 'Unknown Ad Set' && ad.adset?.name) {
+        creative.adsetName = ad.adset.name;
+      }
+    }
+
+    // Post processing: calculate derived metrics
+    return Array.from(creativeMap.values()).map((c) => {
+      const ctr = c.impressions > 0 ? (c.clicks / c.impressions) * 100 : 0;
+      const cpc = c.clicks > 0 ? c.spend / c.clicks : 0;
+      const cpm = c.impressions > 0 ? (c.spend / c.impressions) * 1000 : 0;
+      const roas = c.spend > 0 ? c.purchaseValue / c.spend : 0;
+      // Use maxFrequency as a proxy for fatigue? Or average frequency?
+      // Weighted average frequency
+      const frequency = c.reach > 0 ? c.impressions / c.reach : 0;
+
+      // Determine performance
+      let performance = 'average';
+      if (c.spend === 0) {
+        performance = 'average';
+      } else if (roas > 3.0) {
+        performance = 'excellent';
+      } else if (roas > 1.5 || (cpc < 1.0 && ctr > 1.0)) {
+        performance = 'good';
+      } else if (ctr < 0.5 || cpc > 3.0) {
+        performance = 'poor';
+      }
+
+      // Determine fatigue
+      let fatigueLevel = 'low';
+      if (frequency > 3.5) fatigueLevel = 'high';
+      else if (frequency > 2.0) fatigueLevel = 'medium';
+
+      return {
+        ...c,
+        ctr,
+        cpc,
+        cpm,
+        roas,
+        frequency, // derived frequency
+        performance,
+        fatigueLevel,
+        fatigueConfidence: 85,
+      };
+    });
   }
 
-  async getDemographics(adAccountId: string, accessToken: string, dateRange: string): Promise<any> {
+  async getDemographics(
+    adAccountId: string,
+    accessToken: string,
+    dateRange: string,
+  ): Promise<any> {
     const datePreset = this.getDatePreset(dateRange);
-    
-    const result = await this.makeGraphApiCall(`/act_${adAccountId}/insights`, accessToken, {
-      fields: 'impressions,clicks,spend,actions',
-      date_preset: datePreset,
-      breakdowns: 'age,gender',
-    });
+
+    const result = await this.makeGraphApiCall(
+      `/act_${adAccountId}/insights`,
+      accessToken,
+      {
+        fields: 'impressions,clicks,spend,actions',
+        date_preset: datePreset,
+        breakdowns: 'age,gender',
+      },
+    );
 
     return result.data || [];
   }
@@ -165,70 +353,92 @@ export class FacebookService {
 
   private getDatePreset(dateRange: string): string {
     const presetMap: Record<string, string> = {
-      'today': 'today',
-      'yesterday': 'yesterday',
-      'last_7d': 'last_7d',
-      'last_14d': 'last_14d',
-      'last_30d': 'last_30d',
-      'last_90d': 'last_90d',
-      'this_month': 'this_month',
-      'last_month': 'last_month',
+      today: 'today',
+      yesterday: 'yesterday',
+      last_7d: 'last_7d',
+      last_14d: 'last_14d',
+      last_30d: 'last_30d',
+      last_90d: 'last_90d',
+      this_month: 'this_month',
+      last_month: 'last_month',
     };
     return presetMap[dateRange] || 'last_30d';
   }
 
   // Cache methods (unchanged)
-  async saveCampaignData(sessionId: number, campaigns: any[], dateRange: string): Promise<void> {
+  async saveCampaignData(
+    sessionId: number,
+    campaigns: any[],
+    dateRange: string,
+  ): Promise<void> {
     await this.campaignDataRepository.delete({ sessionId, dateRange });
-    
-    const entities = campaigns.map(campaign => this.campaignDataRepository.create({
-      sessionId,
-      campaignId: campaign.id,
-      campaignName: campaign.name || 'Unknown',
-      clicks: parseInt(campaign.insights?.clicks || 0),
-      impressions: parseInt(campaign.insights?.impressions || 0),
-      reach: parseInt(campaign.insights?.reach || 0),
-      spend: parseFloat(campaign.insights?.spend || 0),
-      cpc: parseFloat(campaign.insights?.cpc || 0),
-      cpm: parseFloat(campaign.insights?.cpm || 0),
-      ctr: campaign.insights?.ctr || '0%',
-      status: campaign.status || 'UNKNOWN',
-      objective: campaign.objective || 'UNKNOWN',
-      dateRange,
-    }));
-    
+
+    const entities = campaigns.map((campaign) =>
+      this.campaignDataRepository.create({
+        sessionId,
+        campaignId: campaign.id,
+        campaignName: campaign.name || 'Unknown',
+        clicks: parseInt(campaign.insights?.clicks || 0),
+        impressions: parseInt(campaign.insights?.impressions || 0),
+        reach: parseInt(campaign.insights?.reach || 0),
+        spend: parseFloat(campaign.insights?.spend || 0),
+        cpc: parseFloat(campaign.insights?.cpc || 0),
+        cpm: parseFloat(campaign.insights?.cpm || 0),
+        ctr: campaign.insights?.ctr || '0%',
+        status: campaign.status || 'UNKNOWN',
+        objective: campaign.objective || 'UNKNOWN',
+        dateRange,
+      }),
+    );
+
     await this.campaignDataRepository.save(entities);
   }
 
-  async getCampaignData(sessionId: number, dateRange: string): Promise<CampaignData[]> {
+  async getCampaignData(
+    sessionId: number,
+    dateRange: string,
+  ): Promise<CampaignData[]> {
     return this.campaignDataRepository.find({
       where: { sessionId, dateRange },
       order: { spend: 'DESC' },
     });
   }
 
-  async saveMetricsCache(sessionId: number, metrics: any[], dateRange: string): Promise<void> {
+  async saveMetricsCache(
+    sessionId: number,
+    metrics: any[],
+    dateRange: string,
+  ): Promise<void> {
     await this.metricsCacheRepository.delete({ sessionId, dateRange });
-    
-    const entities = metrics.map(metric => this.metricsCacheRepository.create({
-      sessionId,
-      metricName: metric.label,
-      metricValue: metric.value,
-      dateRange,
-    }));
-    
+
+    const entities = metrics.map((metric) =>
+      this.metricsCacheRepository.create({
+        sessionId,
+        metricName: metric.label,
+        metricValue: metric.value,
+        dateRange,
+      }),
+    );
+
     await this.metricsCacheRepository.save(entities);
   }
 
-  async getMetricsCache(sessionId: number, dateRange: string): Promise<MetricsCache[]> {
+  async getMetricsCache(
+    sessionId: number,
+    dateRange: string,
+  ): Promise<MetricsCache[]> {
     return this.metricsCacheRepository.find({
       where: { sessionId, dateRange },
     });
   }
 
-  async saveCreativesCache(adAccountId: string, dateRange: string, payload: any): Promise<void> {
+  async saveCreativesCache(
+    adAccountId: string,
+    dateRange: string,
+    payload: any,
+  ): Promise<void> {
     await this.creativesCacheRepository.delete({ adAccountId, dateRange });
-    
+
     const cache = this.creativesCacheRepository.create({
       adAccountId,
       dateRange,
@@ -237,7 +447,11 @@ export class FacebookService {
     await this.creativesCacheRepository.save(cache);
   }
 
-  async getCreativesCache(adAccountId: string, dateRange: string, maxAgeHours: number): Promise<any | null> {
+  async getCreativesCache(
+    adAccountId: string,
+    dateRange: string,
+    maxAgeHours: number,
+  ): Promise<any | null> {
     const cache = await this.creativesCacheRepository.findOne({
       where: { adAccountId, dateRange },
       order: { createdAt: 'DESC' },
@@ -247,14 +461,17 @@ export class FacebookService {
 
     const ageMs = Date.now() - cache.createdAt.getTime();
     const ttlMs = Math.max(0, Number(maxAgeHours) || 0) * 60 * 60 * 1000;
-    
+
     if (ttlMs > 0 && ageMs < ttlMs) {
       return cache.payload;
     }
     return null;
   }
 
-  async clearCreativesCache(adAccountId?: string, dateRange?: string): Promise<void> {
+  async clearCreativesCache(
+    adAccountId?: string,
+    dateRange?: string,
+  ): Promise<void> {
     if (adAccountId && dateRange) {
       await this.creativesCacheRepository.delete({ adAccountId, dateRange });
     } else {
@@ -262,27 +479,41 @@ export class FacebookService {
     }
   }
 
-  async getAdsets(adAccountId: string, accessToken: string, dateRange: string): Promise<any> {
+  async getAdsets(
+    adAccountId: string,
+    accessToken: string,
+    dateRange: string,
+  ): Promise<any> {
     const datePreset = this.getDatePreset(dateRange);
-    
-    const result = await this.makeGraphApiCall(`/act_${adAccountId}/adsets`, accessToken, {
-      fields: 'id,name,status,effective_status,daily_budget,lifetime_budget,start_time,end_time,campaign{id,name},targeting,optimization_goal',
-      limit: '200',
-    });
+
+    const result = await this.makeGraphApiCall(
+      `/act_${adAccountId}/adsets`,
+      accessToken,
+      {
+        fields:
+          'id,name,status,effective_status,daily_budget,lifetime_budget,start_time,end_time,campaign{id,name},targeting,optimization_goal',
+        limit: '200',
+      },
+    );
 
     const adsets = result.data || [];
 
     // Fetch insights for adsets
-    const insightsResult = await this.makeGraphApiCall(`/act_${adAccountId}/insights`, accessToken, {
-      fields: 'adset_id,impressions,clicks,spend,reach,frequency,cpc,cpm,ctr,actions,action_values',
-      level: 'adset',
-      time_increment: 'all_days',
-      date_preset: datePreset,
-      limit: '200',
-    });
+    const insightsResult = await this.makeGraphApiCall(
+      `/act_${adAccountId}/insights`,
+      accessToken,
+      {
+        fields:
+          'adset_id,impressions,clicks,spend,reach,frequency,cpc,cpm,ctr,actions,action_values',
+        level: 'adset',
+        time_increment: 'all_days',
+        date_preset: datePreset,
+        limit: '200',
+      },
+    );
 
     const insightsByAdset = new Map<string, any>();
-    for (const insight of (insightsResult.data || [])) {
+    for (const insight of insightsResult.data || []) {
       insightsByAdset.set(insight.adset_id, {
         impressions: parseInt(insight.impressions || '0'),
         clicks: parseInt(insight.clicks || '0'),
@@ -316,7 +547,11 @@ export class FacebookService {
     };
   }
 
-  async getAdPreview(adId: string, accessToken: string, format: string = 'DESKTOP_FEED_STANDARD'): Promise<any> {
+  async getAdPreview(
+    adId: string,
+    accessToken: string,
+    format: string = 'DESKTOP_FEED_STANDARD',
+  ): Promise<any> {
     const fallbackFormats = [
       format,
       'MOBILE_FEED_STANDARD',
@@ -327,9 +562,13 @@ export class FacebookService {
 
     for (const fmt of fallbackFormats) {
       try {
-        const result = await this.makeGraphApiCall(`/${adId}/previews`, accessToken, {
-          ad_format: fmt,
-        });
+        const result = await this.makeGraphApiCall(
+          `/${adId}/previews`,
+          accessToken,
+          {
+            ad_format: fmt,
+          },
+        );
 
         if (result.data && result.data.length > 0) {
           return {
@@ -350,13 +589,19 @@ export class FacebookService {
     };
   }
 
-  async getCreativePreview(creativeId: string, accessToken: string): Promise<any> {
+  async getCreativePreview(
+    creativeId: string,
+    accessToken: string,
+  ): Promise<any> {
     const result = await this.makeGraphApiCall(`/${creativeId}`, accessToken, {
       fields: 'id,name,title,body,thumbnail_url,image_url,object_story_spec',
     });
 
-    return result;
+    // Transform snake_case to camelCase for frontend compatibility
+    return {
+      ...result,
+      thumbnailUrl: result.thumbnail_url,
+      imageUrl: result.image_url,
+    };
   }
 }
-
-

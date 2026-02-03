@@ -16,7 +16,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
         ssl: {
           rejectUnauthorized: false, // Required for Neon PostgreSQL
         },
-        logging: process.env.NODE_ENV === 'development',
+        logging: false, // Disabled for cleaner auth debugging
       }),
     }),
   ],

@@ -5,10 +5,32 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import cookieParser from 'cookie-parser';
 import compression from 'compression';
 import helmet from 'helmet';
+import * as fs from 'fs';
+import * as path from 'path';
 
 async function bootstrap() {
+  // Load SSL certificates for HTTPS (development only)
+  const isDev = process.env.NODE_ENV !== 'production';
+  let httpsOptions: { key: Buffer; cert: Buffer } | undefined;
+
+  if (isDev) {
+    try {
+      httpsOptions = {
+        key: fs.readFileSync(
+          path.join(__dirname, '..', 'certificates', 'localhost-key.pem'),
+        ),
+        cert: fs.readFileSync(
+          path.join(__dirname, '..', 'certificates', 'localhost.pem'),
+        ),
+      };
+    } catch (error) {
+      console.warn('SSL certificates not found, running without HTTPS');
+    }
+  }
+
   const app = await NestFactory.create(AppModule, {
     rawBody: true,
+    ...(httpsOptions && { httpsOptions }),
   });
 
   // Set global prefix
@@ -75,7 +97,8 @@ async function bootstrap() {
 
   const port = process.env.PORT ?? 3001;
   await app.listen(port);
-  console.log(`Server running on http://localhost:${port}`);
-  console.log(`API Docs: http://localhost:${port}/docs`);
+  const protocol = httpsOptions ? 'https' : 'http';
+  console.log(`Server running on ${protocol}://localhost:${port}`);
+  console.log(`API Docs: ${protocol}://localhost:${port}/docs`);
 }
 bootstrap();

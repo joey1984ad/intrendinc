@@ -1,4 +1,13 @@
-import { Controller, Post, Body, Res, UseGuards, Get, HttpStatus, Req } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Body,
+  Res,
+  UseGuards,
+  Get,
+  HttpStatus,
+  Req,
+} from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { AuthService } from './auth.service';
 import type { Response, Request } from 'express';
@@ -14,47 +23,84 @@ export class AuthController {
     private configService: ConfigService,
   ) {}
 
-  @Post('login')
-  async login(@Body() loginDto: LoginDto, @Res({ passthrough: true }) response: Response) {
-    const user = await this.authService.validateUser(loginDto.email, loginDto.password);
-    if (!user) {
-      response.status(HttpStatus.UNAUTHORIZED).json({ error: 'Invalid credentials' });
-      return;
-    }
-    
-    const { access_token, user: userData } = await this.authService.login(user);
-    
-    response.cookie('session_token', access_token, {
+  private getCookieOptions() {
+    return {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
+      secure: true, // Always true now since server uses HTTPS
+      sameSite: 'none' as const, // Allow cross-origin
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
       path: '/',
-    });
+    };
+  }
+
+  @Post('login')
+  async login(
+    @Body() loginDto: LoginDto,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const user = await this.authService.validateUser(
+      loginDto.email,
+      loginDto.password,
+    );
+    if (!user) {
+      response
+        .status(HttpStatus.UNAUTHORIZED)
+        .json({ error: 'Invalid credentials' });
+      return;
+    }
+
+    const { access_token, user: userData } = await this.authService.login(user);
+
+    response.cookie('session_token', access_token, this.getCookieOptions());
 
     return { success: true, user: userData, access_token };
   }
 
   @Post('signup')
-  async signup(@Body() registerDto: RegisterDto, @Res({ passthrough: true }) response: Response) {
+  async signup(
+    @Body() registerDto: RegisterDto,
+    @Res({ passthrough: true }) response: Response,
+  ) {
     const user = await this.authService.register(registerDto);
     const { access_token, user: userData } = await this.authService.login(user);
 
-    response.cookie('session_token', access_token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-      path: '/',
+    const cookieOptions = this.getCookieOptions();
+    console.log('[AUTH] Setting cookie on signup:', {
+      options: cookieOptions,
+      tokenLength: access_token.length,
+      userId: userData.id,
     });
+    response.cookie('session_token', access_token, cookieOptions);
 
     return { success: true, user: userData, access_token };
   }
 
   @Post('logout')
   async logout(@Res({ passthrough: true }) response: Response) {
-    response.clearCookie('session_token');
+    const cookieOptions = this.getCookieOptions();
+    delete cookieOptions.maxAge; // Remove maxAge for clearCookie
+    response.clearCookie('session_token', cookieOptions);
     return { success: true };
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('refresh')
+  async refresh(
+    @CurrentUser() user: any,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    // Generate new token with fresh expiration
+    const { access_token, user: userData } = await this.authService.login(user);
+
+    const cookieOptions = this.getCookieOptions();
+    console.log('[AUTH] Refreshing token:', {
+      options: cookieOptions,
+      tokenLength: access_token.length,
+      userId: userData.id,
+    });
+    response.cookie('session_token', access_token, cookieOptions);
+
+    return { success: true, user: userData, access_token };
   }
 
   @UseGuards(JwtAuthGuard)
@@ -65,7 +111,12 @@ export class AuthController {
 
   @UseGuards(JwtAuthGuard)
   @Get('session')
-  getSession(@CurrentUser() user: any) {
+  getSession(@CurrentUser() user: any, @Req() req: Request) {
+    console.log('[AUTH] Session request:', {
+      hasCookie: !!req.cookies?.session_token,
+      hasAuthHeader: !!req.headers.authorization,
+      userId: user?.id,
+    });
     return { authenticated: true, user };
   }
 
@@ -81,36 +132,40 @@ export class AuthController {
   async googleAuthCallback(@Req() req: Request, @Res() res: Response) {
     try {
       const googleUser = req.user as any;
-      
+
       // Find or create user
       const user = await this.authService.findOrCreateGoogleUser({
         email: googleUser.email,
         firstName: googleUser.firstName,
         lastName: googleUser.lastName,
       });
-      
+
       // Generate JWT
-      const { access_token, user: userData } = await this.authService.login(user);
-      
+      const { access_token, user: userData } =
+        await this.authService.login(user);
+
       // Set cookie (will work if frontend and backend are on same domain)
-      res.cookie('session_token', access_token, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
-        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-        path: '/',
+      const cookieOptions = this.getCookieOptions();
+      console.log('[AUTH] Setting cookie on Google OAuth:', {
+        options: cookieOptions,
+        tokenLength: access_token.length,
+        userId: userData.id,
       });
-      
+      res.cookie('session_token', access_token, cookieOptions);
+
       // Redirect to frontend callback page with token in URL (as backup)
       // This ensures auth works even when cookie can't be set across different ports
-      const frontendUrl = this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000';
+      const frontendUrl =
+        this.configService.get<string>('FRONTEND_URL') ||
+        'http://localhost:3000';
       const redirectUrl = `${frontendUrl}/auth/callback?token=${encodeURIComponent(access_token)}`;
       return res.redirect(redirectUrl);
     } catch (error) {
       console.error('Google auth callback error:', error);
-      const frontendUrl = this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000';
+      const frontendUrl =
+        this.configService.get<string>('FRONTEND_URL') ||
+        'http://localhost:3000';
       return res.redirect(`${frontendUrl}/login?error=google_auth_failed`);
     }
   }
 }
-

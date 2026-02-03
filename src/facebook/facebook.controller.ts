@@ -230,7 +230,7 @@ export class FacebookController {
     }
 
     const demographics = await this.facebookService.getDemographics(
-      adAccountId,
+      adAccountId.replace('act_', ''),
       session.accessToken,
       dateRange,
     );
@@ -318,6 +318,99 @@ export class FacebookController {
       body.dateRange || 'last_30d',
     );
     return { success: true, ...result };
+  }
+
+  // Ads
+  @Post('ads')
+  @UseGuards(JwtAuthGuard)
+  async getAds(
+    @CurrentUser() user: any,
+    @Body()
+    body: { accessToken?: string; adAccountId: string; dateRange?: string },
+  ) {
+    if (!body.adAccountId) {
+      throw new BadRequestException('adAccountId is required');
+    }
+
+    let accessToken = body.accessToken;
+    if (!accessToken) {
+      const session = await this.facebookService.getFacebookSession(
+        user.userId,
+      );
+      if (!session) {
+        return { success: false, error: 'No Facebook session found' };
+      }
+      accessToken = session.accessToken;
+    }
+
+    const result = await this.facebookService.getAds(
+      body.adAccountId.replace('act_', ''),
+      accessToken,
+      body.dateRange || 'last_30d',
+    );
+    return { success: true, ...result };
+  }
+
+  // Creatives
+  @Post('creatives')
+  @UseGuards(JwtAuthGuard)
+  async getCreatives(
+    @CurrentUser() user: any,
+    @Body()
+    body: { accessToken?: string; adAccountId: string; dateRange?: string },
+  ) {
+    if (!body.adAccountId) {
+      throw new BadRequestException('adAccountId is required');
+    }
+
+    let accessToken = body.accessToken;
+    if (!accessToken) {
+      const session = await this.facebookService.getFacebookSession(
+        user.userId,
+      );
+      if (!session) {
+        return { success: false, error: 'No Facebook session found' };
+      }
+      accessToken = session.accessToken;
+    }
+
+    const creatives = await this.facebookService.getCreatives(
+      body.adAccountId.replace('act_', ''),
+      accessToken,
+      body.dateRange || 'last_30d',
+    );
+    return { success: true, creatives };
+  }
+
+  // Insights
+  @Post('insights')
+  @UseGuards(JwtAuthGuard)
+  async getInsights(
+    @CurrentUser() user: any,
+    @Body()
+    body: { accessToken?: string; adAccountId: string; dateRange?: string },
+  ) {
+    if (!body.adAccountId) {
+      throw new BadRequestException('adAccountId is required');
+    }
+
+    let accessToken = body.accessToken;
+    if (!accessToken) {
+      const session = await this.facebookService.getFacebookSession(
+        user.userId,
+      );
+      if (!session) {
+        return { success: false, error: 'No Facebook session found' };
+      }
+      accessToken = session.accessToken;
+    }
+
+    const insights = await this.facebookService.getInsights(
+      body.adAccountId.replace('act_', ''),
+      accessToken,
+      body.dateRange || 'last_30d',
+    );
+    return { success: true, insights };
   }
 
   // Ad Preview
