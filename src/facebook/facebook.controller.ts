@@ -15,7 +15,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 
 @Controller('facebook')
 export class FacebookController {
-  constructor(private readonly facebookService: FacebookService) {}
+  constructor(private readonly facebookService: FacebookService) { }
 
   @Get('health')
   async healthCheck() {
@@ -323,7 +323,7 @@ export class FacebookController {
   // Ads
   @Post('ads')
   @UseGuards(JwtAuthGuard)
-  async getAds(
+  async getAdsPost(
     @CurrentUser() user: any,
     @Body()
     body: { accessToken?: string; adAccountId: string; dateRange?: string },
@@ -354,7 +354,7 @@ export class FacebookController {
   // Creatives
   @Post('creatives')
   @UseGuards(JwtAuthGuard)
-  async getCreatives(
+  async getCreativesPost(
     @CurrentUser() user: any,
     @Body()
     body: { accessToken?: string; adAccountId: string; dateRange?: string },
@@ -382,13 +382,13 @@ export class FacebookController {
     return { success: true, creatives };
   }
 
-  // Insights
+  // Insights (Daily breakdown for InsightsGraph component)
   @Post('insights')
   @UseGuards(JwtAuthGuard)
-  async getInsights(
+  async getInsightsPost(
     @CurrentUser() user: any,
     @Body()
-    body: { accessToken?: string; adAccountId: string; dateRange?: string },
+    body: { accessToken?: string; adAccountId: string; dateRange?: string; compare?: boolean },
   ) {
     if (!body.adAccountId) {
       throw new BadRequestException('adAccountId is required');
@@ -405,12 +405,13 @@ export class FacebookController {
       accessToken = session.accessToken;
     }
 
-    const insights = await this.facebookService.getInsights(
+    const result = await this.facebookService.getDailyInsights(
       body.adAccountId.replace('act_', ''),
       accessToken,
       body.dateRange || 'last_30d',
+      body.compare || false,
     );
-    return { success: true, insights };
+    return { success: true, ...result };
   }
 
   // Ad Preview

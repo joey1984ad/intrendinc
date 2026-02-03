@@ -154,6 +154,222 @@ export class FacebookService {
     return result.data?.[0] || {};
   }
 
+  async getDailyInsights(
+    adAccountId: string,
+    accessToken: string,
+    dateRange: string,
+    compare: boolean = false,
+  ): Promise<{
+    data: { current: any[]; previous: any[] | null };
+    summaryStats: any;
+  }> {
+    // Calculate date ranges based on dateRange
+    const { datePreset, dayCount } = this.getDatePresetAndDays(dateRange);
+
+    this.logger.log(`[getDailyInsights] Fetching insights for account ${adAccountId}, dateRange: ${dateRange}, compare: ${compare}`);
+    this.logger.log(`[getDailyInsights] Using date_preset: ${datePreset} (${dayCount} days)`);
+
+    try {
+      // Fetch current period insights with daily breakdown using date_preset
+      const currentInsights = await this.makeGraphApiCall(
+        `/act_${adAccountId}/insights`,
+        accessToken,
+        {
+          fields: 'impressions,clicks,spend,ctr,cpc,cpm,reach,actions',
+          date_preset: datePreset,
+          time_increment: '1',  // Daily breakdown
+          level: 'account',
+          limit: '100',
+        },
+      );
+
+      this.logger.log(`[getDailyInsights] Current insights response: ${JSON.stringify(currentInsights).substring(0, 500)}...`);
+
+      // Transform current period data
+      const currentData = (currentInsights.data || []).map((day: any) => {
+        const revenue = this.calculateRevenue(day.actions);
+        const spend = parseFloat(day.spend || '0');
+        return {
+          date: day.date_start,
+          spend,
+          revenue,
+          roas: spend > 0 ? revenue / spend : 0,
+          clicks: parseInt(day.clicks || '0'),
+          impressions: parseInt(day.impressions || '0'),
+          ctr: parseFloat(day.ctr || '0'),
+          cpc: parseFloat(day.cpc || '0'),
+          cpm: parseFloat(day.cpm || '0'),
+        };
+      });
+
+      // Fetch previous period if compare mode is enabled
+      let previousData: any[] | null = null;
+      if (compare) {
+        // Calculate dates for previous period using getDateRange
+        const { startDate: currentStartDate } = this.getDateRange(dateRange);
+        const prevEndDate = new Date(currentStartDate);
+        prevEndDate.setDate(prevEndDate.getDate() - 1);
+        const prevStartDate = new Date(prevEndDate);
+        prevStartDate.setDate(prevStartDate.getDate() - dayCount + 1);
+
+        const previousInsights = await this.makeGraphApiCall(
+          `/act_${adAccountId}/insights`,
+          accessToken,
+          {
+            fields: 'impressions,clicks,spend,ctr,cpc,cpm,reach,actions',
+            time_range: JSON.stringify({
+              since: prevStartDate.toISOString().split('T')[0],
+              until: prevEndDate.toISOString().split('T')[0],
+            }),
+            time_increment: '1',
+            level: 'account',
+            limit: '100',
+          },
+        );
+
+        previousData = (previousInsights.data || []).map((day: any) => {
+          const revenue = this.calculateRevenue(day.actions);
+          const spend = parseFloat(day.spend || '0');
+          return {
+            date: day.date_start,
+            spend,
+            revenue,
+            roas: spend > 0 ? revenue / spend : 0,
+            clicks: parseInt(day.clicks || '0'),
+            impressions: parseInt(day.impressions || '0'),
+            ctr: parseFloat(day.ctr || '0'),
+            cpc: parseFloat(day.cpc || '0'),
+            cpm: parseFloat(day.cpm || '0'),
+          };
+        });
+      }
+
+      // Calculate summary stats
+      const sumData = (data: any[]) => data.reduce(
+        (acc, day) => ({
+          spend: acc.spend + day.spend,
+          revenue: acc.revenue + day.revenue,
+          clicks: acc.clicks + day.clicks,
+          impressions: acc.impressions + day.impressions,
+          roas: 0, // Will calculate after
+        }),
+        { spend: 0, revenue: 0, clicks: 0, impressions: 0, roas: 0 },
+      );
+
+      const currentSums = sumData(currentData);
+      currentSums.roas = currentSums.spend > 0 ? currentSums.revenue / currentSums.spend : 0;
+
+      const previousSums = previousData ? sumData(previousData) : null;
+      if (previousSums) {
+        previousSums.roas = previousSums.spend > 0 ? previousSums.revenue / previousSums.spend : 0;
+      }
+
+      const calcChange = (current: number, previous: number | null) =>
+        previous && previous > 0 ? ((current - previous) / previous) * 100 : 0;
+
+      const summaryStats = {
+        spend: {
+          current: currentSums.spend,
+          previous: previousSums?.spend || 0,
+          change: calcChange(currentSums.spend, previousSums?.spend || null),
+        },
+        revenue: {
+          current: currentSums.revenue,
+          previous: previousSums?.revenue || 0,
+          change: calcChange(currentSums.revenue, previousSums?.revenue || null),
+        },
+        roas: {
+          current: currentSums.roas,
+          previous: previousSums?.roas || 0,
+          change: calcChange(currentSums.roas, previousSums?.roas || null),
+        },
+        clicks: {
+          current: currentSums.clicks,
+          previous: previousSums?.clicks || 0,
+          change: calcChange(currentSums.clicks, previousSums?.clicks || null),
+        },
+        impressions: {
+          current: currentSums.impressions,
+          previous: previousSums?.impressions || 0,
+          change: calcChange(currentSums.impressions, previousSums?.impressions || null),
+        },
+      };
+
+      return {
+        data: { current: currentData, previous: previousData },
+        summaryStats,
+      };
+    } catch (error) {
+      this.logger.error(`[getDailyInsights] Error fetching insights: ${error}`);
+      // Return empty data on error instead of crashing
+      return {
+        data: { current: [], previous: null },
+        summaryStats: {
+          spend: { current: 0, previous: 0, change: 0 },
+          revenue: { current: 0, previous: 0, change: 0 },
+          roas: { current: 0, previous: 0, change: 0 },
+          clicks: { current: 0, previous: 0, change: 0 },
+          impressions: { current: 0, previous: 0, change: 0 },
+        },
+      };
+    }
+  }
+  private getDateRange(dateRange: string): { startDate: string; endDate: string; dayCount: number } {
+    const endDate = new Date();
+    const startDate = new Date();
+    let dayCount = 30;
+
+    switch (dateRange) {
+      case 'last_7d':
+        startDate.setDate(endDate.getDate() - 7);
+        dayCount = 7;
+        break;
+      case 'last_14d':
+        startDate.setDate(endDate.getDate() - 14);
+        dayCount = 14;
+        break;
+      case 'last_30d':
+        startDate.setDate(endDate.getDate() - 30);
+        dayCount = 30;
+        break;
+      case 'last_90d':
+        startDate.setDate(endDate.getDate() - 90);
+        dayCount = 90;
+        break;
+      default:
+        startDate.setDate(endDate.getDate() - 30);
+        dayCount = 30;
+    }
+
+    return {
+      startDate: startDate.toISOString().split('T')[0],
+      endDate: endDate.toISOString().split('T')[0],
+      dayCount,
+    };
+  }
+
+  private getDatePresetAndDays(dateRange: string): { datePreset: string; dayCount: number } {
+    switch (dateRange) {
+      case 'last_7d':
+        return { datePreset: 'last_7d', dayCount: 7 };
+      case 'last_14d':
+        return { datePreset: 'last_14d', dayCount: 14 };
+      case 'last_30d':
+        return { datePreset: 'last_30d', dayCount: 30 };
+      case 'last_90d':
+        return { datePreset: 'last_90d', dayCount: 90 };
+      default:
+        return { datePreset: 'last_30d', dayCount: 30 };
+    }
+  }
+  private calculateRevenue(actions: any[] | undefined): number {
+    if (!actions) return 0;
+    const purchaseActions = actions.filter(
+      (a: any) => a.action_type === 'purchase' || a.action_type === 'omni_purchase',
+    );
+    return purchaseActions.reduce((sum: number, a: any) => sum + parseFloat(a.value || '0'), 0);
+  }
+
   async getCreatives(
     adAccountId: string,
     accessToken: string,
