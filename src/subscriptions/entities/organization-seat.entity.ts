@@ -31,6 +31,9 @@ export class OrganizationSeat {
   @Column({ name: 'ad_account_name', type: 'varchar', length: 255 })
   adAccountName: string;
 
+  @Column({ type: 'varchar', length: 50, nullable: true, default: 'facebook' })
+  platform: string;
+
   @Column({ type: 'varchar', length: 50, nullable: true, default: 'active' })
   status: string;
 
