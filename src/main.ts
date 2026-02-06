@@ -46,6 +46,7 @@ async function bootstrap() {
       'https://www.itsintrend.com',
       'https://gpthumanize.pro',
       'https://www.gpthumanize.pro',
+      'https://itsintrend.com',
     ],
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
