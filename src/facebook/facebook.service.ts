@@ -10,7 +10,7 @@ import { ConfigService } from '@nestjs/config';
 @Injectable()
 export class FacebookService {
   private readonly logger = new Logger(FacebookService.name);
-  private readonly graphApiVersion = 'v18.0';
+  private readonly graphApiVersion = 'v23.0';
 
   constructor(
     @InjectRepository(FacebookSession)
