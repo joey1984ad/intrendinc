@@ -1,27 +1,29 @@
-import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
+import { Entity, Column, PrimaryGeneratedColumn, ManyToOne, JoinColumn, Index } from 'typeorm';
 import { User } from '../../users/entities/user.entity';
 import { OrganizationSubscription } from './organization-subscription.entity';
 
 @Entity('organization_billing_history')
+@Index('idx_organization_billing_history_subscription_id', ['organizationSubscriptionId'])
+@Index('idx_organization_billing_history_user_id', ['userId'])
 export class OrganizationBillingHistory {
   @PrimaryGeneratedColumn()
   id: number;
 
-  @Column({ name: 'organization_subscription_id' })
+  @Column({ name: 'organization_subscription_id', nullable: true })
   organizationSubscriptionId: number;
 
-  @ManyToOne(() => OrganizationSubscription)
+  @ManyToOne(() => OrganizationSubscription, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'organization_subscription_id' })
   organizationSubscription: OrganizationSubscription;
 
-  @Column({ name: 'user_id' })
+  @Column({ name: 'user_id', nullable: true })
   userId: number;
 
-  @ManyToOne(() => User)
+  @ManyToOne(() => User, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'user_id' })
   user: User;
 
-  @Column({ name: 'stripe_invoice_id' })
+  @Column({ name: 'stripe_invoice_id', type: 'varchar', length: 255 })
   stripeInvoiceId: string;
 
   @Column({ name: 'amount_cents' })
@@ -30,18 +32,18 @@ export class OrganizationBillingHistory {
   @Column()
   quantity: number;
 
-  @Column({ name: 'billing_period_start' })
+  @Column({ name: 'billing_period_start', type: 'timestamp' })
   billingPeriodStart: Date;
 
-  @Column({ name: 'billing_period_end' })
+  @Column({ name: 'billing_period_end', type: 'timestamp' })
   billingPeriodEnd: Date;
 
-  @Column({ default: 'paid' })
+  @Column({ type: 'varchar', length: 50, nullable: true, default: 'paid' })
   status: string;
 
-  @Column({ name: 'paid_at', nullable: true })
+  @Column({ name: 'paid_at', type: 'timestamp', nullable: true })
   paidAt: Date;
 
-  @CreateDateColumn({ name: 'created_at' })
+  @Column({ name: 'created_at', type: 'timestamp', nullable: true, default: () => 'CURRENT_TIMESTAMP' })
   createdAt: Date;
 }

@@ -1,31 +1,36 @@
-import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, UpdateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
+import { Entity, Column, PrimaryGeneratedColumn, ManyToOne, JoinColumn, Index } from 'typeorm';
 import { User } from '../../users/entities/user.entity';
 
 @Entity('ai_generated_creatives')
+@Index('idx_ai_creatives_user_account', ['userId', 'adAccountId'])
+@Index('idx_ai_creatives_type', ['creativeType'])
+@Index('idx_ai_creatives_status', ['status'])
+@Index('idx_ai_creatives_created', ['createdAt'])
+@Index('idx_ai_creatives_tags', ['tags'])
 export class AiGeneratedCreative {
   @PrimaryGeneratedColumn()
   id: number;
 
-  @Column({ name: 'user_id' })
+  @Column({ name: 'user_id', nullable: true })
   userId: number;
 
-  @ManyToOne(() => User)
+  @ManyToOne(() => User, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'user_id' })
   user: User;
 
-  @Column({ name: 'ad_account_id' })
+  @Column({ name: 'ad_account_id', type: 'varchar', length: 255 })
   adAccountId: string;
 
-  @Column({ name: 'ad_account_name', nullable: true, length: 500 })
+  @Column({ name: 'ad_account_name', type: 'varchar', length: 500, nullable: true })
   adAccountName: string;
 
-  @Column({ name: 'creative_name', nullable: true, length: 500 })
+  @Column({ name: 'creative_name', type: 'varchar', length: 500, nullable: true })
   creativeName: string;
 
-  @Column({ name: 'creative_type', length: 50 })
+  @Column({ name: 'creative_type', type: 'varchar', length: 50 })
   creativeType: string;
 
-  @Column({ name: 'source_creative_id', nullable: true })
+  @Column({ name: 'source_creative_id', type: 'varchar', length: 255, nullable: true })
   sourceCreativeId: string;
 
   @Column({ name: 'source_creative_url', nullable: true, type: 'text' })
@@ -64,15 +69,15 @@ export class AiGeneratedCreative {
   @Column({ nullable: true, type: 'text' })
   notes: string;
 
-  @Column({ name: 'is_favorite', default: false })
+  @Column({ name: 'is_favorite', nullable: true, default: false })
   isFavorite: boolean;
 
-  @Column({ default: 'draft', length: 50 })
+  @Column({ type: 'varchar', length: 50, nullable: true, default: 'draft' })
   status: string;
 
-  @CreateDateColumn({ name: 'created_at' })
+  @Column({ name: 'created_at', type: 'timestamp', nullable: true, default: () => 'CURRENT_TIMESTAMP' })
   createdAt: Date;
 
-  @UpdateDateColumn({ name: 'updated_at' })
+  @Column({ name: 'updated_at', type: 'timestamp', nullable: true, default: () => 'CURRENT_TIMESTAMP' })
   updatedAt: Date;
 }

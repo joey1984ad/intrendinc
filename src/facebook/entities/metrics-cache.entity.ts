@@ -1,4 +1,4 @@
-import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
+import { Entity, Column, PrimaryGeneratedColumn, ManyToOne, JoinColumn } from 'typeorm';
 import { FacebookSession } from './facebook-session.entity';
 
 @Entity('metrics_cache')
@@ -13,15 +13,15 @@ export class MetricsCache {
   @JoinColumn({ name: 'session_id' })
   session: FacebookSession;
 
-  @Column({ name: 'metric_name' })
+  @Column({ name: 'metric_name', type: 'varchar', length: 100 })
   metricName: string;
 
   @Column({ name: 'metric_value', type: 'text' })
   metricValue: string;
 
-  @Column({ name: 'date_range', nullable: true })
+  @Column({ name: 'date_range', type: 'varchar', length: 20, nullable: true })
   dateRange: string;
 
-  @CreateDateColumn({ name: 'created_at' })
+  @Column({ name: 'created_at', type: 'timestamp', nullable: true, default: () => 'CURRENT_TIMESTAMP' })
   createdAt: Date;
 }

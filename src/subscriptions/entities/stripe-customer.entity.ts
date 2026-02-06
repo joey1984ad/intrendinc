@@ -1,7 +1,8 @@
-import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, UpdateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
+import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, UpdateDateColumn, ManyToOne, JoinColumn, Index } from 'typeorm';
 import { User } from '../../users/entities/user.entity';
 
 @Entity('stripe_customers')
+@Index('idx_stripe_customers_user_id', ['userId'])
 export class StripeCustomer {
   @PrimaryGeneratedColumn()
   id: number;
@@ -9,14 +10,15 @@ export class StripeCustomer {
   @Column({ name: 'user_id' })
   userId: number;
 
-  @ManyToOne(() => User)
+  @ManyToOne(() => User, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'user_id' })
   user: User;
 
-  @Column({ name: 'stripe_customer_id', unique: true })
+  @Column({ name: 'stripe_customer_id', type: 'varchar', length: 255 })
+  @Index('stripe_customers_stripe_customer_id_key', { unique: true })
   stripeCustomerId: string;
 
-  @Column()
+  @Column({ type: 'varchar', length: 255 })
   email: string;
 
   @CreateDateColumn({ name: 'created_at' })

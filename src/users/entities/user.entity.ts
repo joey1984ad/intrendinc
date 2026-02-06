@@ -1,35 +1,36 @@
-import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
 
 @Entity('users')
 export class User {
   @PrimaryGeneratedColumn()
   id: number;
 
-  @Column({ unique: true, length: 255 })
+  @Column({ type: 'varchar', length: 255 })
+  @Index('users_email_key', { unique: true })
   email: string;
 
-  @Column({ name: 'first_name', length: 100, nullable: true })
+  @Column({ name: 'first_name', type: 'varchar', length: 100, nullable: true })
   firstName: string;
 
-  @Column({ name: 'last_name', length: 100, nullable: true })
+  @Column({ name: 'last_name', type: 'varchar', length: 100, nullable: true })
   lastName: string;
 
-  @Column({ length: 255, nullable: true })
+  @Column({ type: 'varchar', length: 255, nullable: true })
   company: string;
 
-  @Column({ length: 255, nullable: true })
+  @Column({ type: 'varchar', length: 255, nullable: true })
   password: string;
 
-  @Column({ name: 'current_plan_id', length: 100, default: 'free' })
+  @Column({ name: 'current_plan_id', type: 'varchar', length: 100, default: 'free' })
   currentPlanId: string;
 
-  @Column({ name: 'current_plan_name', length: 100, default: 'Free' })
+  @Column({ name: 'current_plan_name', type: 'varchar', length: 100, default: 'Free' })
   currentPlanName: string;
 
-  @Column({ name: 'current_billing_cycle', length: 20, default: 'monthly' })
+  @Column({ name: 'current_billing_cycle', type: 'varchar', length: 20, default: 'monthly' })
   currentBillingCycle: string;
 
-  @Column({ name: 'subscription_status', length: 50, default: 'inactive' })
+  @Column({ name: 'subscription_status', type: 'varchar', length: 50, default: 'inactive' })
   subscriptionStatus: string;
 
   @Column({ name: 'is_trial_user', default: false })
@@ -41,7 +42,7 @@ export class User {
   @Column({ name: 'trial_end', type: 'timestamp', nullable: true })
   trialEnd: Date;
 
-  @Column({ length: 50, default: 'user' })
+  @Column({ type: 'varchar', length: 50, default: 'user' })
   role: string;
 
   @CreateDateColumn({ name: 'created_at' })
