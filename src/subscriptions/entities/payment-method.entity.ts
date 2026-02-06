@@ -10,7 +10,7 @@ export class PaymentMethod {
   @Column({ name: 'user_id', nullable: true })
   userId: number;
 
-  @ManyToOne(() => User)
+  @ManyToOne(() => User, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'user_id' })
   user: User;
 

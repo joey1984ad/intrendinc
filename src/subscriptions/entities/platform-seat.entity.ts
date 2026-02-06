@@ -17,14 +17,14 @@ export class PlatformSeat {
   @Column({ name: 'subscription_id' })
   subscriptionId: number;
 
-  @ManyToOne(() => PlatformSubscription)
+  @ManyToOne(() => PlatformSubscription, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'subscription_id' })
   subscription: PlatformSubscription;
 
   @Column({ name: 'user_id' })
   userId: number;
 
-  @ManyToOne(() => User)
+  @ManyToOne(() => User, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'user_id' })
   user: User;
 
