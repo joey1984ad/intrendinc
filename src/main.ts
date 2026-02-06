@@ -10,7 +10,7 @@ import * as path from 'path';
 
 async function bootstrap() {
   // Load SSL certificates for HTTPS (development only)
-  const isDev = process.env.NODE_ENV !== 'production';
+  const isDev = process.env.NODE_ENV === 'development';
   let httpsOptions: { key: Buffer; cert: Buffer } | undefined;
 
   if (isDev) {
