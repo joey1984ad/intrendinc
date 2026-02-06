@@ -91,7 +91,7 @@ export class FacebookService {
   async getAdAccounts(accessToken: string): Promise<any[]> {
     const result = await this.makeGraphApiCall('/me/adaccounts', accessToken, {
       fields: 'id,name,account_status,currency,timezone_name',
-      limit: '100',
+      limit: '50',
     });
     return result.data || [];
   }
@@ -111,7 +111,7 @@ export class FacebookService {
       {
         fields:
           'id,name,status,adset_id,campaign_id,creative{id,name,thumbnail_url,image_url}',
-        limit: '100', // Reduce limit
+        limit: '50', // Reduce limit
       },
     );
 
@@ -179,7 +179,7 @@ export class FacebookService {
           date_preset: datePreset,
           time_increment: '1',  // Daily breakdown
           level: 'account',
-          limit: '100',
+          limit: '50',
         },
       );
 
@@ -223,7 +223,7 @@ export class FacebookService {
             }),
             time_increment: '1',
             level: 'account',
-            limit: '100',
+            limit: '50',
           },
         );
 
@@ -392,7 +392,7 @@ export class FacebookService {
           'adset{name}',
           `insights.date_preset(${datePreset}){spend,clicks,impressions,ctr,cpc,actions,action_values,reach,frequency}`,
         ].join(','),
-        limit: '500',
+        limit: '50',
       },
     );
 
@@ -708,7 +708,7 @@ export class FacebookService {
       {
         fields:
           'id,name,status,effective_status,daily_budget,lifetime_budget,start_time,end_time,campaign{id,name},targeting,optimization_goal',
-        limit: '200',
+        limit: '50',
       },
     );
 
@@ -724,7 +724,7 @@ export class FacebookService {
         level: 'adset',
         time_increment: 'all_days',
         date_preset: datePreset,
-        limit: '200',
+        limit: '50',
       },
     );
 
