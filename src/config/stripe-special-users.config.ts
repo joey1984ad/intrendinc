@@ -30,8 +30,31 @@ function parseEnvFile(filePath: string): Record<string, string> {
   }
 }
 
-// Try to find .env.dev in project root or current dir
-const envDevPath = path.resolve(process.cwd(), '.env.dev');
+// Try to find .env.dev in multiple locations
+function findEnvDevFile(): string {
+  const possiblePaths = [
+    // Relative to this config file (src/config -> project root)
+    path.resolve(__dirname, '../../.env.dev'),
+    // From project root via cwd
+    path.resolve(process.cwd(), '.env.dev'),
+    // In case server runs from project root
+    path.resolve(process.cwd(), 'server/.env.dev'),
+    // Dist folder case (dist/config -> project root)  
+    path.resolve(__dirname, '../../../.env.dev'),
+  ];
+  
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) {
+      console.log(`[stripe-special-users] Found .env.dev at: ${p}`);
+      return p;
+    }
+  }
+  
+  console.warn(`[stripe-special-users] .env.dev not found in any of: ${possiblePaths.join(', ')}`);
+  return possiblePaths[0]; // Return first path anyway, parseEnvFile will handle the error
+}
+
+const envDevPath = findEnvDevFile();
 const devConfig = parseEnvFile(envDevPath);
 
 const specialUsers = (devConfig.STRIPE_SPECIAL_USERS || '').split(',').filter(Boolean);
