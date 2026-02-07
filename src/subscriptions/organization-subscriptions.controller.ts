@@ -221,6 +221,7 @@ export class OrganizationSubscriptionsController {
         adAccountIds: JSON.stringify(adAccountIds),
         adAccountNames: JSON.stringify(adAccountNames),
       },
+      email: userDetails.email,
     });
 
     return {
