@@ -201,28 +201,17 @@ export class OrganizationSubscriptionsController {
     }
 
     // Determine the price ID based on planId and billingCycle
-    let priceId: string | undefined;
+    // Use getOrganizationPriceIds which handles special users (test vs live accounts)
     const planKey = body.planId.toLowerCase();
-    const cycleKey = body.billingCycle.toLowerCase();
-
+    const cycleKey = body.billingCycle.toLowerCase() as 'monthly' | 'annual';
+    
+    const priceIds = this.stripeService.getOrganizationPriceIds(cycleKey, userDetails.email);
+    
+    let priceId: string | undefined;
     if (planKey.includes('basic') || planKey.includes('starter')) {
-      priceId =
-        cycleKey === 'annual'
-          ? this.configService.get<string>(
-              'stripe.organizationBasicAnnualPriceId',
-            )
-          : this.configService.get<string>(
-              'stripe.organizationBasicMonthlyPriceId',
-            );
+      priceId = priceIds.basic;
     } else if (planKey.includes('pro')) {
-      priceId =
-        cycleKey === 'annual'
-          ? this.configService.get<string>(
-              'stripe.organizationProAnnualPriceId',
-            )
-          : this.configService.get<string>(
-              'stripe.organizationProMonthlyPriceId',
-            );
+      priceId = priceIds.pro;
     }
 
     if (!priceId) {
