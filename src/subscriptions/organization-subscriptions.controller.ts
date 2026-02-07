@@ -148,14 +148,46 @@ export class OrganizationSubscriptionsController {
     }
 
     // Get or create Stripe customer
+    // For special users, we need to verify the customer exists in the correct Stripe account
+    // (test vs live) since customer IDs are account-specific
     let stripeCustomer = await this.subscriptionsService.getStripeCustomer(
       user.userId,
     );
     let customerId = stripeCustomer?.stripeCustomerId;
 
-    if (!customerId) {
-      const name =
-        `${userDetails.firstName || ''} ${userDetails.lastName || ''}`.trim();
+    const name =
+      `${userDetails.firstName || ''} ${userDetails.lastName || ''}`.trim();
+
+    if (customerId) {
+      // Verify customer exists in the Stripe account we're using
+      try {
+        const existingCustomer = await this.stripeService.getCustomerByEmail(userDetails.email);
+        if (!existingCustomer || existingCustomer.id !== customerId) {
+          // Customer doesn't exist or ID mismatch - create new one in correct account
+          const customer = await this.stripeService.createCustomer(
+            userDetails.email,
+            name,
+          );
+          customerId = customer.id;
+          // Update stored customer ID
+          await this.subscriptionsService.updateStripeCustomer(
+            user.userId,
+            customerId,
+          );
+        }
+      } catch (error) {
+        // Customer lookup failed - create new one
+        const customer = await this.stripeService.createCustomer(
+          userDetails.email,
+          name,
+        );
+        customerId = customer.id;
+        await this.subscriptionsService.updateStripeCustomer(
+          user.userId,
+          customerId,
+        );
+      }
+    } else {
       const customer = await this.stripeService.createCustomer(
         userDetails.email,
         name,

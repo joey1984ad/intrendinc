@@ -46,6 +46,11 @@ export class SubscriptionsService {
     await this.stripeCustomerRepository.delete({ userId });
   }
 
+  async updateStripeCustomer(userId: number, stripeCustomerId: string): Promise<StripeCustomer | null> {
+    await this.stripeCustomerRepository.update({ userId }, { stripeCustomerId });
+    return this.stripeCustomerRepository.findOneBy({ userId });
+  }
+
   // Subscription Management
   async createSubscription(subscriptionData: Partial<Subscription>): Promise<Subscription> {
     const subscription = this.subscriptionRepository.create(subscriptionData);
