@@ -24,13 +24,18 @@ export class StripeService implements OnModuleInit {
   }
 
   getClient(email?: string): Stripe {
+    this.logger.log(`[getClient] Called with email: ${email}`);
+    this.logger.log(`[getClient] Special users config keys: ${Object.keys(stripeSpecialUsersConfig).join(', ') || 'EMPTY'}`);
+    
     // Check if the email corresponds to a special user configuration
     if (email && stripeSpecialUsersConfig[email]) {
       const specialConfig = stripeSpecialUsersConfig[email];
+      this.logger.log(`[getClient] MATCH FOUND for ${email}, using special secretKey starting with: ${specialConfig.secretKey?.substring(0, 15)}...`);
       return new Stripe(specialConfig.secretKey, {
         apiVersion: '2024-12-18.acacia' as any,
       });
     }
+    this.logger.log(`[getClient] No match, using default stripe client`);
     return this.stripe;
   }
 
