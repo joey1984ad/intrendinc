@@ -51,6 +51,7 @@ export class StripeController {
       mode: body.mode,
       metadata: { ...body.metadata, userId: user.id.toString() },
       allowPromotionCodes: body.allowPromotionCodes,
+      email: user.email,
     });
 
     return { sessionId: session.id, url: session.url };
@@ -90,6 +91,7 @@ export class StripeController {
         userId: user.id.toString(),
         type: 'organization',
       },
+      email: user.email,
     });
 
     return { sessionId: session.id, url: session.url };
@@ -111,7 +113,7 @@ export class StripeController {
       await this.subscriptionsService.createStripeCustomer(user.id, customerId, user.email);
     }
 
-    const session = await this.stripeService.createCustomerPortalSession(customerId, body.returnUrl);
+    const session = await this.stripeService.createCustomerPortalSession(customerId, body.returnUrl, user.email);
 
     return { url: session.url };
   }
@@ -136,10 +138,9 @@ export class StripeController {
         throw new BadRequestException('Raw body not available');
       }
 
-      const event = this.stripeService.getStripeClient().webhooks.constructEvent(
-        rawBody,
+      const event = await this.stripeService.constructEventFromPayload(
         signature,
-        webhookSecret,
+        rawBody
       );
 
       // Handle the event
@@ -196,19 +197,13 @@ export class StripeController {
       await this.subscriptionsService.createStripeCustomer(user.id, customerId, user.email);
     }
 
-    // Get the price ID from environment
-    const priceMap: Record<string, Record<string, string | undefined>> = {
-      basic: {
-        monthly: this.configService.get<string>('stripe.organizationBasicMonthlyPriceId'),
-        annual: this.configService.get<string>('stripe.organizationBasicAnnualPriceId'),
-      },
-      pro: {
-        monthly: this.configService.get<string>('stripe.organizationProMonthlyPriceId'),
-        annual: this.configService.get<string>('stripe.organizationProAnnualPriceId'),
-      },
-    };
+    // Get the price ID from environment via service (handles special users)
+    const priceIds = this.stripeService.getOrganizationPriceIds(body.billingCycle as any, user.email);
+    
+    // map planId to extracted price
+    const priceId = body.planId === 'basic' ? priceIds.basic : (body.planId === 'pro' ? priceIds.pro : undefined);
 
-    const priceId = priceMap[body.planId]?.[body.billingCycle];
+
     if (!priceId) {
       throw new BadRequestException('Invalid plan or billing cycle');
     }
@@ -234,6 +229,7 @@ export class StripeController {
         adAccountNames: JSON.stringify(body.adAccounts.map(a => a.name)),
       },
       allowPromotionCodes: true,
+      email: user.email,
     });
 
     return {
@@ -394,6 +390,11 @@ export class StripeController {
       throw new BadRequestException(`Invalid platform: ${platformParam}`);
     }
 
+    // For public endpoints we don't have user context easily unless we pass it or make it authenticated.
+    // However, pricing is usually public. If we want "custom" pricing for logged in users, we need to make this authenticated
+    // or pass email as query param. The current controller is public (no @UseGuards on this method? Wait, let me check)
+    // Actually there is no @UseGuards on getPlatformPlans.
+    // For now, we will use default pricing for public view. If user is logged in they usually hit checkout.
     const monthlyPrices = this.stripeService.getPlatformPriceIds(platform, 'monthly');
     const annualPrices = this.stripeService.getPlatformPriceIds(platform, 'annual');
 

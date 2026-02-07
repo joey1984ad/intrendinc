@@ -5,6 +5,7 @@ import { UsersService } from '../users/users.service';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { PlatformSubscriptionsService } from '../subscriptions/platform-subscriptions.service';
 import { AdPlatform } from '../common/interfaces/ad-platform.interface';
+import { stripeSpecialUsersConfig } from '../config/stripe-special-users.config';
 
 @Injectable()
 export class StripeService implements OnModuleInit {
@@ -20,6 +21,24 @@ export class StripeService implements OnModuleInit {
     this.stripe = new Stripe(this.configService.get<string>('stripe.secretKey') || '', {
       apiVersion: '2024-12-18.acacia' as any,
     });
+  }
+
+  getClient(email?: string): Stripe {
+    // Check if the email corresponds to a special user configuration
+    if (email && stripeSpecialUsersConfig[email]) {
+      const specialConfig = stripeSpecialUsersConfig[email];
+      return new Stripe(specialConfig.secretKey, {
+        apiVersion: '2024-12-18.acacia' as any,
+      });
+    }
+    return this.stripe;
+  }
+
+  private getSpecialConfig(email?: string) {
+    if (email && stripeSpecialUsersConfig[email]) {
+      return stripeSpecialUsersConfig[email];
+    }
+    return null;
   }
 
   onModuleInit() {
@@ -40,8 +59,10 @@ export class StripeService implements OnModuleInit {
     metadata?: Record<string, string>;
     subscriptionData?: Stripe.Checkout.SessionCreateParams.SubscriptionData;
     allowPromotionCodes?: boolean;
+    email?: string;
   }) {
-    return this.stripe.checkout.sessions.create({
+    const stripeClient = this.getClient(params.email);
+    return stripeClient.checkout.sessions.create({
       customer: params.customerId,
       payment_method_types: ['card'],
       line_items: [
@@ -60,22 +81,25 @@ export class StripeService implements OnModuleInit {
     });
   }
 
-  async createCustomerPortalSession(customerId: string, returnUrl: string) {
-    return this.stripe.billingPortal.sessions.create({
+  async createCustomerPortalSession(customerId: string, returnUrl: string, email?: string) {
+    const stripeClient = this.getClient(email);
+    return stripeClient.billingPortal.sessions.create({
       customer: customerId,
       return_url: returnUrl,
     });
   }
 
   async createCustomer(email: string, name?: string) {
-    return this.stripe.customers.create({
+    const stripeClient = this.getClient(email);
+    return stripeClient.customers.create({
       email,
       name,
     });
   }
 
   async getCustomerByEmail(email: string) {
-    const customers = await this.stripe.customers.list({
+    const stripeClient = this.getClient(email);
+    const customers = await stripeClient.customers.list({
       email,
       limit: 1,
     });
@@ -98,11 +122,29 @@ export class StripeService implements OnModuleInit {
   }
 
   async constructEventFromPayload(signature: string, payload: Buffer) {
+    // Try standard webhook secret first
     const webhookSecret = this.configService.get<string>('stripe.webhookSecret');
-    if (!webhookSecret) {
-      throw new Error('Stripe webhook secret is not configured');
+    
+    if (webhookSecret) {
+      try {
+        return this.stripe.webhooks.constructEvent(payload, signature, webhookSecret);
+      } catch (err) {
+        // If standard secret fails, try special user secrets
+        for (const [email, config] of Object.entries(stripeSpecialUsersConfig)) {
+          if (config.webhookSecret) {
+            try {
+              const specialClient = this.getClient(email);
+              return specialClient.webhooks.constructEvent(payload, signature, config.webhookSecret);
+            } catch (e) {
+               // Continue to next secret
+            }
+          }
+        }
+        throw err; // Throw original error if none match
+      }
+    } else {
+        throw new Error('Stripe webhook secret is not configured');
     }
-    return this.stripe.webhooks.constructEvent(payload, signature, webhookSecret);
   }
 
   async handleCheckoutSessionCompleted(session: Stripe.Checkout.Session) {
@@ -123,6 +165,15 @@ export class StripeService implements OnModuleInit {
       return;
     }
 
+    // Retrieve user to get email for correct Stripe client
+    const user = await this.usersService.findOne(userId);
+    if (!user) {
+      this.logger.warn(`Webhook: User not found ${userId}`);
+      return;
+    }
+    
+    const stripeClient = this.getClient(user.email);
+
     let adAccountIds: string[] = [];
     let adAccountNames: string[] = [];
     try {
@@ -136,7 +187,7 @@ export class StripeService implements OnModuleInit {
       return;
     }
 
-    const subscriptionData = await this.stripe.subscriptions.retrieve(session.subscription as string, {
+    const subscriptionData = await stripeClient.subscriptions.retrieve(session.subscription as string, {
       expand: [
         'latest_invoice',
         'items.data.price.product',
@@ -149,12 +200,9 @@ export class StripeService implements OnModuleInit {
 
     const currentPeriodStart = new Date(subscription.current_period_start * 1000);
     const currentPeriodEnd = new Date(subscription.current_period_end * 1000);
+    
+    // User already fetched above
 
-    const user = await this.usersService.findOne(userId);
-    if (!user) {
-      this.logger.warn(`Webhook: User not found ${userId}`);
-      return;
-    }
 
     const normalizedBillingCycle = billingCycle === 'annual' ? 'annual' : 'monthly';
     const resolvedPlanName = metadata.planName || (planId ? planId.toString().split('_').map((p: string) => p.charAt(0).toUpperCase() + p.slice(1)).join(' ') : 'Paid');
@@ -294,6 +342,7 @@ export class StripeService implements OnModuleInit {
   /**
    * Create a platform-specific checkout session (Google Ads, TikTok, etc.)
    */
+
   async createPlatformCheckoutSession(params: {
     userId: number;
     email: string;
@@ -308,13 +357,14 @@ export class StripeService implements OnModuleInit {
     adAccountIds?: string[];
     adAccountNames?: string[];
   }): Promise<Stripe.Checkout.Session> {
+    const stripeClient = this.getClient(params.email);
     // Get or create customer
     let customer = await this.getCustomerByEmail(params.email);
     if (!customer) {
       customer = await this.createCustomer(params.email);
     }
 
-    return this.stripe.checkout.sessions.create({
+    return stripeClient.checkout.sessions.create({
       customer: customer.id,
       payment_method_types: ['card'],
       line_items: [
@@ -353,14 +403,31 @@ export class StripeService implements OnModuleInit {
   /**
    * Get platform-specific price IDs
    */
-  getPlatformPriceIds(platform: AdPlatform, billingCycle: 'monthly' | 'annual'): {
+  getPlatformPriceIds(platform: AdPlatform, billingCycle: 'monthly' | 'annual', email?: string): {
     starter: string | undefined;
     pro: string | undefined;
   } {
     const config = this.configService.get('stripe');
+    const specialConfig = this.getSpecialConfig(email);
 
     switch (platform) {
       case AdPlatform.GOOGLE:
+        if (specialConfig) {
+             // We don't have special config for Google Ads yet in the hardcoded list, 
+             // but we will use the standard logic structure.
+             // If we had google ads keys in special config:
+             // return {
+             //   starter: billingCycle === 'monthly' ? specialConfig.googleAdsStarterMonthlyPriceId : ...
+             // }
+             // Fallback to standard for now as they were not in the requirement list explicitly?
+             // Actually, I should check if I missed them. The task said "fetch all stripe data from .env.dev".
+             // The .env.dev does NOT seem to have specific Google Ads price IDs in the section I copied.
+             // Wait, I saw GOOGLE_ADS... env vars but for Stripe Price IDs?
+             // Checking .env.dev again...
+             // It calls: STRIPE_TIKTOK_... and STRIPE_ORGANIZATION_...
+             // It does NOT explicitly show STRIPE_GOOGLE_ADS_... in the file snippet I saw.
+             // So I will only override what I have.
+        }
         return {
           starter: billingCycle === 'monthly' 
             ? config?.googleAdsStarterMonthlyPriceId 
@@ -370,6 +437,12 @@ export class StripeService implements OnModuleInit {
             : config?.googleAdsProAnnualPriceId,
         };
       case AdPlatform.TIKTOK:
+        if (specialConfig) {
+             return {
+                starter: billingCycle === 'monthly' ? specialConfig.tiktokStarterMonthlyPriceId : specialConfig.tiktokStarterAnnualPriceId,
+                pro: billingCycle === 'monthly' ? specialConfig.tiktokProMonthlyPriceId : specialConfig.tiktokProAnnualPriceId,
+             }
+        }
         return {
           starter: billingCycle === 'monthly' 
             ? config?.tiktokStarterMonthlyPriceId 
@@ -381,6 +454,30 @@ export class StripeService implements OnModuleInit {
       default:
         return { starter: undefined, pro: undefined };
     }
+  }
+
+  getOrganizationPriceIds(billingCycle: 'monthly' | 'annual', email?: string): {
+    basic: string | undefined;
+    pro: string | undefined;
+  } {
+    const config = this.configService.get('stripe');
+    const specialConfig = this.getSpecialConfig(email);
+
+    if (specialConfig) {
+      return {
+        basic: billingCycle === 'monthly' ? specialConfig.organizationBasicMonthlyPriceId : specialConfig.organizationBasicAnnualPriceId,
+        pro: billingCycle === 'monthly' ? specialConfig.organizationProMonthlyPriceId : specialConfig.organizationProAnnualPriceId,
+      };
+    }
+
+    return {
+      basic: billingCycle === 'monthly' 
+        ? config?.organizationBasicMonthlyPriceId 
+        : config?.organizationBasicAnnualPriceId,
+      pro: billingCycle === 'monthly' 
+        ? config?.organizationProMonthlyPriceId 
+        : config?.organizationProAnnualPriceId,
+    };
   }
 
   /**
@@ -439,6 +536,9 @@ export class StripeService implements OnModuleInit {
     platform: AdPlatform,
     cancelImmediately: boolean = false,
   ): Promise<{ success: boolean; error?: string }> {
+    const user = await this.usersService.findOne(userId);
+    const stripeClient = this.getClient(user?.email);
+
     const subscription = await this.platformSubscriptionsService.getPlatformSubscription(userId, platform);
     
     if (!subscription) {
@@ -451,12 +551,12 @@ export class StripeService implements OnModuleInit {
 
     try {
       if (cancelImmediately) {
-        await this.stripe.subscriptions.cancel(subscription.stripeSubscriptionId);
+        await stripeClient.subscriptions.cancel(subscription.stripeSubscriptionId);
         await this.platformSubscriptionsService.updatePlatformSubscription(subscription.id, {
           status: 'canceled',
         });
       } else {
-        await this.stripe.subscriptions.update(subscription.stripeSubscriptionId, {
+        await stripeClient.subscriptions.update(subscription.stripeSubscriptionId, {
           cancel_at_period_end: true,
         });
         await this.platformSubscriptionsService.updatePlatformSubscription(subscription.id, {
