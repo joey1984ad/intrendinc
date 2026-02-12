@@ -101,35 +101,406 @@ export class FacebookService {
     accessToken: string,
     dateRange: string,
   ): Promise<any> {
-    const datePreset = this.getDatePreset(dateRange);
+    const dateParams = this.getDateParams(dateRange);
 
-    // Request basic ad data without insights to avoid data overload
-    // Insights can be fetched separately per ad if needed
-    const result = await this.makeGraphApiCall(
+    const adsResult = await this.makeGraphApiCall(
       `/act_${adAccountId}/ads`,
       accessToken,
       {
         fields:
           'id,name,status,adset_id,campaign_id,creative{id,name,thumbnail_url,image_url}',
-        limit: '50', // Reduce limit
+        limit: '200',
       },
     );
 
-    // Transform snake_case to camelCase for frontend compatibility
-    const transformedAds = (result.data || []).map((ad: any) => ({
-      ...ad,
-      creative: ad.creative
-        ? {
-          ...ad.creative,
-          thumbnailUrl: ad.creative.thumbnail_url,
-          imageUrl: ad.creative.image_url,
-        }
-        : undefined,
-    }));
+    const [
+      accountResult,
+      adInsightsResult,
+      campaignResult,
+      campaignInsightsResult,
+      dailyInsightsResult,
+      platformInsightsResult,
+    ] = await Promise.all([
+      this.makeGraphApiCall(`/act_${adAccountId}`, accessToken, {
+        fields: 'id,name,account_status,currency,timezone_name',
+      }).catch(() => null),
+      this.makeGraphApiCall(`/act_${adAccountId}/insights`, accessToken, {
+        fields:
+          'ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,impressions,clicks,spend,ctr,cpc,cpm,reach,actions,action_values',
+        level: 'ad',
+        time_increment: 'all_days',
+        limit: '500',
+        ...dateParams,
+      }).catch(() => ({ data: [] })),
+      this.makeGraphApiCall(`/act_${adAccountId}/campaigns`, accessToken, {
+        fields: 'id,name,status,objective',
+        limit: '200',
+      }).catch(() => ({ data: [] })),
+      this.makeGraphApiCall(`/act_${adAccountId}/insights`, accessToken, {
+        fields:
+          'campaign_id,campaign_name,impressions,clicks,spend,ctr,cpc,cpm,reach,actions,action_values',
+        level: 'campaign',
+        time_increment: 'all_days',
+        limit: '200',
+        ...dateParams,
+      }).catch(() => ({ data: [] })),
+      this.makeGraphApiCall(`/act_${adAccountId}/insights`, accessToken, {
+        fields: 'impressions,clicks,spend,ctr,cpc,cpm,reach,actions,action_values',
+        level: 'account',
+        time_increment: '1',
+        limit: '400',
+        ...dateParams,
+      }).catch(() => ({ data: [] })),
+      this.makeGraphApiCall(`/act_${adAccountId}/insights`, accessToken, {
+        fields: 'impressions,clicks,spend,ctr,cpc,cpm,reach,actions,action_values',
+        level: 'account',
+        breakdowns: 'publisher_platform',
+        time_increment: 'all_days',
+        limit: '100',
+        ...dateParams,
+      }).catch(() => ({ data: [] })),
+    ]);
+
+    const adInsightsById = new Map<string, any>();
+    for (const insight of adInsightsResult.data || []) {
+      const adId = String(insight.ad_id || '');
+      if (!adId) continue;
+
+      const metrics = this.extractMetrics(insight);
+      adInsightsById.set(adId, {
+        ...metrics,
+        adset_name: insight.adset_name || 'Unknown Ad Set',
+        campaign_name: insight.campaign_name || 'Unknown Campaign',
+      });
+    }
+
+    const transformedAds = (adsResult.data || []).map((ad: any) => {
+      const adId = String(ad.id || '');
+      const insight = adInsightsById.get(adId) || this.getZeroMetrics();
+
+      return {
+        ...ad,
+        adset_name: insight.adset_name || 'Unknown Ad Set',
+        campaign_name: insight.campaign_name || 'Unknown Campaign',
+        insights: {
+          spend: insight.spend,
+          clicks: insight.clicks,
+          impressions: insight.impressions,
+          reach: insight.reach,
+          ctr: insight.ctr,
+          cpc: insight.cpc,
+          cpm: insight.cpm,
+          revenue: insight.revenue,
+          conversions: insight.conversions,
+          roas: insight.roas,
+        },
+        creative: ad.creative
+          ? {
+              ...ad.creative,
+              thumbnailUrl: ad.creative.thumbnail_url,
+              imageUrl: ad.creative.image_url,
+            }
+          : undefined,
+      };
+    });
+
+    const campaignMetaById = new Map<string, any>();
+    for (const campaign of campaignResult.data || []) {
+      campaignMetaById.set(String(campaign.id), campaign);
+    }
+
+    const campaignInsightsById = new Map<string, any>();
+    for (const insight of campaignInsightsResult.data || []) {
+      const campaignId = String(insight.campaign_id || '');
+      if (!campaignId) continue;
+
+      const metrics = this.extractMetrics(insight);
+      const existing = campaignInsightsById.get(campaignId);
+
+      if (!existing) {
+        campaignInsightsById.set(campaignId, {
+          id: campaignId,
+          name: insight.campaign_name || `Campaign ${campaignId}`,
+          ...metrics,
+        });
+      } else {
+        existing.clicks += metrics.clicks;
+        existing.impressions += metrics.impressions;
+        existing.reach += metrics.reach;
+        existing.spend += metrics.spend;
+        existing.revenue += metrics.revenue;
+        existing.conversions += metrics.conversions;
+        existing.ctr =
+          existing.impressions > 0
+            ? (existing.clicks / existing.impressions) * 100
+            : 0;
+        existing.cpc =
+          existing.clicks > 0 ? existing.spend / existing.clicks : 0;
+        existing.cpm =
+          existing.impressions > 0
+            ? (existing.spend / existing.impressions) * 1000
+            : 0;
+        existing.roas =
+          existing.spend > 0 ? existing.revenue / existing.spend : 0;
+      }
+    }
+
+    const campaigns = Array.from(campaignMetaById.values()).map(
+      (campaignMeta: any) => {
+        const id = String(campaignMeta.id);
+        const insight = campaignInsightsById.get(id) || {
+          id,
+          name: campaignMeta.name || `Campaign ${id}`,
+          ...this.getZeroMetrics(),
+        };
+
+        return {
+          id,
+          name: campaignMeta.name || insight.name,
+          status: campaignMeta.status || 'UNKNOWN',
+          objective: campaignMeta.objective || 'UNKNOWN',
+          insights: {
+            clicks: insight.clicks,
+            impressions: insight.impressions,
+            reach: insight.reach,
+            spend: insight.spend,
+            cpc: insight.cpc,
+            cpm: insight.cpm,
+            ctr: insight.ctr,
+            revenue: insight.revenue,
+            conversions: insight.conversions,
+            roas: insight.roas,
+          },
+        };
+      },
+    );
+
+    for (const [campaignId, insight] of campaignInsightsById.entries()) {
+      if (campaignMetaById.has(campaignId)) continue;
+      campaigns.push({
+        id: campaignId,
+        name: insight.name || `Campaign ${campaignId}`,
+        status: 'UNKNOWN',
+        objective: 'UNKNOWN',
+        insights: {
+          clicks: insight.clicks,
+          impressions: insight.impressions,
+          reach: insight.reach,
+          spend: insight.spend,
+          cpc: insight.cpc,
+          cpm: insight.cpm,
+          ctr: insight.ctr,
+          revenue: insight.revenue,
+          conversions: insight.conversions,
+          roas: insight.roas,
+        },
+      });
+    }
+
+    campaigns.sort(
+      (a, b) => (b.insights?.spend || 0) - (a.insights?.spend || 0),
+    );
+
+    const insights = (dailyInsightsResult.data || [])
+      .map((day: any) => {
+        const metrics = this.extractMetrics(day);
+        return {
+          date_start: day.date_start,
+          date_stop: day.date_stop,
+          clicks: metrics.clicks,
+          impressions: metrics.impressions,
+          reach: metrics.reach,
+          spend: metrics.spend,
+          cpc: metrics.cpc,
+          cpm: metrics.cpm,
+          ctr: metrics.ctr,
+          revenue: metrics.revenue,
+          conversions: metrics.conversions,
+          roas: metrics.roas,
+        };
+      })
+      .sort(
+        (a: any, b: any) =>
+          new Date(a.date_start).getTime() - new Date(b.date_start).getTime(),
+      );
+
+    const accountTotals = insights.reduce(
+      (acc: any, row: any) => {
+        acc.totalClicks += row.clicks || 0;
+        acc.totalImpressions += row.impressions || 0;
+        acc.totalReach += row.reach || 0;
+        acc.totalSpent += row.spend || 0;
+        acc.totalRevenue += row.revenue || 0;
+        acc.totalConversions += row.conversions || 0;
+        return acc;
+      },
+      {
+        totalRevenue: 0,
+        totalSpent: 0,
+        avgROAS: 0,
+        totalClicks: 0,
+        totalImpressions: 0,
+        totalReach: 0,
+        avgCPC: 0,
+        avgCPM: 0,
+        avgCTR: 0,
+        totalConversions: 0,
+      },
+    );
+
+    accountTotals.avgCPC =
+      accountTotals.totalClicks > 0
+        ? accountTotals.totalSpent / accountTotals.totalClicks
+        : 0;
+    accountTotals.avgCPM =
+      accountTotals.totalImpressions > 0
+        ? (accountTotals.totalSpent / accountTotals.totalImpressions) * 1000
+        : 0;
+    accountTotals.avgCTR =
+      accountTotals.totalImpressions > 0
+        ? (accountTotals.totalClicks / accountTotals.totalImpressions) * 100
+        : 0;
+    accountTotals.avgROAS =
+      accountTotals.totalSpent > 0
+        ? accountTotals.totalRevenue / accountTotals.totalSpent
+        : 0;
+
+    // Fallback: if daily insights are unavailable, derive totals from campaign aggregates.
+    if (insights.length === 0 && campaigns.length > 0) {
+      const campaignTotals = campaigns.reduce(
+        (acc: any, campaign: any) => {
+          const campaignInsights = campaign?.insights || {};
+          acc.totalClicks += this.parseInteger(campaignInsights.clicks);
+          acc.totalImpressions += this.parseInteger(campaignInsights.impressions);
+          acc.totalReach += this.parseInteger(campaignInsights.reach);
+          acc.totalSpent += this.parseNumeric(campaignInsights.spend);
+          acc.totalRevenue += this.parseNumeric(campaignInsights.revenue);
+          acc.totalConversions += this.parseNumeric(campaignInsights.conversions);
+          return acc;
+        },
+        {
+          totalRevenue: 0,
+          totalSpent: 0,
+          avgROAS: 0,
+          totalClicks: 0,
+          totalImpressions: 0,
+          totalReach: 0,
+          avgCPC: 0,
+          avgCPM: 0,
+          avgCTR: 0,
+          totalConversions: 0,
+        },
+      );
+
+      campaignTotals.avgCPC =
+        campaignTotals.totalClicks > 0
+          ? campaignTotals.totalSpent / campaignTotals.totalClicks
+          : 0;
+      campaignTotals.avgCPM =
+        campaignTotals.totalImpressions > 0
+          ? (campaignTotals.totalSpent / campaignTotals.totalImpressions) * 1000
+          : 0;
+      campaignTotals.avgCTR =
+        campaignTotals.totalImpressions > 0
+          ? (campaignTotals.totalClicks / campaignTotals.totalImpressions) * 100
+          : 0;
+      campaignTotals.avgROAS =
+        campaignTotals.totalSpent > 0
+          ? campaignTotals.totalRevenue / campaignTotals.totalSpent
+          : 0;
+
+      Object.assign(accountTotals, campaignTotals);
+    }
+
+    const platformStats = new Map<string, any>();
+    for (const row of platformInsightsResult.data || []) {
+      const key = String(row.publisher_platform || 'unknown').toLowerCase();
+      const metrics = this.extractMetrics(row);
+      const existing = platformStats.get(key);
+
+      if (!existing) {
+        platformStats.set(key, {
+          key,
+          clicks: metrics.clicks,
+          impressions: metrics.impressions,
+          reach: metrics.reach,
+          spend: metrics.spend,
+          revenue: metrics.revenue,
+          conversions: metrics.conversions,
+        });
+      } else {
+        existing.clicks += metrics.clicks;
+        existing.impressions += metrics.impressions;
+        existing.reach += metrics.reach;
+        existing.spend += metrics.spend;
+        existing.revenue += metrics.revenue;
+        existing.conversions += metrics.conversions;
+      }
+    }
+
+    const platformNameMap: Record<string, string> = {
+      facebook: 'Facebook',
+      instagram: 'Instagram',
+      audience_network: 'Audience Network',
+      messenger: 'Messenger',
+      unknown: 'Unknown',
+    };
+    const platformColorMap: Record<string, string> = {
+      facebook: '#1877F2',
+      instagram: '#E4405F',
+      audience_network: '#42A5F5',
+      messenger: '#0084FF',
+      unknown: '#94A3B8',
+    };
+
+    const platformBreakdown = Array.from(platformStats.values())
+      .map((platform: any) => {
+        const ctr =
+          platform.impressions > 0
+            ? (platform.clicks / platform.impressions) * 100
+            : 0;
+        const cpc =
+          platform.clicks > 0 ? platform.spend / platform.clicks : 0;
+        const cpm =
+          platform.impressions > 0
+            ? (platform.spend / platform.impressions) * 1000
+            : 0;
+        const roas =
+          platform.spend > 0 ? platform.revenue / platform.spend : 0;
+
+        return {
+          name: platformNameMap[platform.key] || platform.key,
+          value: platform.clicks,
+          color: platformColorMap[platform.key] || '#94A3B8',
+          clicks: platform.clicks,
+          impressions: platform.impressions,
+          reach: platform.reach,
+          spend: platform.spend,
+          cpc,
+          cpm,
+          ctr,
+          revenue: platform.revenue,
+          conversions: platform.conversions,
+          roas,
+        };
+      })
+      .sort((a: any, b: any) => b.value - a.value);
 
     return {
+      accountInfo: {
+        id: accountResult?.id || `act_${adAccountId}`,
+        name: accountResult?.name || `Ad Account ${adAccountId}`,
+        accountStatus: accountResult?.account_status,
+        currency: accountResult?.currency || 'USD',
+        timezoneName: accountResult?.timezone_name || 'UTC',
+      },
+      accountTotals,
+      insights,
+      campaigns,
+      platformBreakdown,
       ads: transformedAds,
-      paging: result.paging,
+      paging: adsResult.paging,
+      dateRange,
     };
   }
 
@@ -138,15 +509,15 @@ export class FacebookService {
     accessToken: string,
     dateRange: string,
   ): Promise<any> {
-    const datePreset = this.getDatePreset(dateRange);
+    const dateParams = this.getDateParams(dateRange);
 
     const result = await this.makeGraphApiCall(
       `/act_${adAccountId}/insights`,
       accessToken,
       {
         fields:
-          'impressions,clicks,spend,ctr,cpc,cpm,reach,frequency,actions,conversions',
-        date_preset: datePreset,
+          'impressions,clicks,spend,ctr,cpc,cpm,reach,frequency,actions,action_values,conversions',
+        ...dateParams,
         level: 'account',
       },
     );
@@ -163,49 +534,53 @@ export class FacebookService {
     data: { current: any[]; previous: any[] | null };
     summaryStats: any;
   }> {
-    // Calculate date ranges based on dateRange
-    const { datePreset, dayCount } = this.getDatePresetAndDays(dateRange);
+    const dateParams = this.getDateParams(dateRange);
+    const { dayCount } = this.getDateRange(dateRange);
+    const dateParamLog =
+      dateParams.date_preset || dateParams.time_range || 'last_30d';
 
-    this.logger.log(`[getDailyInsights] Fetching insights for account ${adAccountId}, dateRange: ${dateRange}, compare: ${compare}`);
-    this.logger.log(`[getDailyInsights] Using date_preset: ${datePreset} (${dayCount} days)`);
+    this.logger.log(
+      `[getDailyInsights] Fetching insights for account ${adAccountId}, dateRange: ${dateRange}, compare: ${compare}`,
+    );
+    this.logger.log(
+      `[getDailyInsights] Using date params: ${dateParamLog} (${dayCount} days)`,
+    );
 
     try {
-      // Fetch current period insights with daily breakdown using date_preset
       const currentInsights = await this.makeGraphApiCall(
         `/act_${adAccountId}/insights`,
         accessToken,
         {
-          fields: 'impressions,clicks,spend,ctr,cpc,cpm,reach,actions',
-          date_preset: datePreset,
-          time_increment: '1',  // Daily breakdown
+          fields: 'impressions,clicks,spend,ctr,cpc,cpm,reach,actions,action_values',
+          ...dateParams,
+          time_increment: '1',
           level: 'account',
-          limit: '50',
+          limit: '400',
         },
       );
 
-      this.logger.log(`[getDailyInsights] Current insights response: ${JSON.stringify(currentInsights).substring(0, 500)}...`);
+      this.logger.log(
+        `[getDailyInsights] Current insights response: ${JSON.stringify(currentInsights).substring(0, 500)}...`,
+      );
 
-      // Transform current period data
       const currentData = (currentInsights.data || []).map((day: any) => {
-        const revenue = this.calculateRevenue(day.actions);
-        const spend = parseFloat(day.spend || '0');
+        const revenue = this.calculateRevenue(day.actions, day.action_values);
+        const spend = this.parseNumeric(day.spend);
         return {
           date: day.date_start,
           spend,
           revenue,
           roas: spend > 0 ? revenue / spend : 0,
-          clicks: parseInt(day.clicks || '0'),
-          impressions: parseInt(day.impressions || '0'),
-          ctr: parseFloat(day.ctr || '0'),
-          cpc: parseFloat(day.cpc || '0'),
-          cpm: parseFloat(day.cpm || '0'),
+          clicks: this.parseInteger(day.clicks),
+          impressions: this.parseInteger(day.impressions),
+          ctr: this.parsePercent(day.ctr),
+          cpc: this.parseNumeric(day.cpc),
+          cpm: this.parseNumeric(day.cpm),
         };
       });
 
-      // Fetch previous period if compare mode is enabled
       let previousData: any[] | null = null;
       if (compare) {
-        // Calculate dates for previous period using getDateRange
         const { startDate: currentStartDate } = this.getDateRange(dateRange);
         const prevEndDate = new Date(currentStartDate);
         prevEndDate.setDate(prevEndDate.getDate() - 1);
@@ -216,45 +591,45 @@ export class FacebookService {
           `/act_${adAccountId}/insights`,
           accessToken,
           {
-            fields: 'impressions,clicks,spend,ctr,cpc,cpm,reach,actions',
+            fields: 'impressions,clicks,spend,ctr,cpc,cpm,reach,actions,action_values',
             time_range: JSON.stringify({
-              since: prevStartDate.toISOString().split('T')[0],
-              until: prevEndDate.toISOString().split('T')[0],
+              since: this.formatDateForApi(prevStartDate),
+              until: this.formatDateForApi(prevEndDate),
             }),
             time_increment: '1',
             level: 'account',
-            limit: '50',
+            limit: '400',
           },
         );
 
         previousData = (previousInsights.data || []).map((day: any) => {
-          const revenue = this.calculateRevenue(day.actions);
-          const spend = parseFloat(day.spend || '0');
+          const revenue = this.calculateRevenue(day.actions, day.action_values);
+          const spend = this.parseNumeric(day.spend);
           return {
             date: day.date_start,
             spend,
             revenue,
             roas: spend > 0 ? revenue / spend : 0,
-            clicks: parseInt(day.clicks || '0'),
-            impressions: parseInt(day.impressions || '0'),
-            ctr: parseFloat(day.ctr || '0'),
-            cpc: parseFloat(day.cpc || '0'),
-            cpm: parseFloat(day.cpm || '0'),
+            clicks: this.parseInteger(day.clicks),
+            impressions: this.parseInteger(day.impressions),
+            ctr: this.parsePercent(day.ctr),
+            cpc: this.parseNumeric(day.cpc),
+            cpm: this.parseNumeric(day.cpm),
           };
         });
       }
 
-      // Calculate summary stats
-      const sumData = (data: any[]) => data.reduce(
-        (acc, day) => ({
-          spend: acc.spend + day.spend,
-          revenue: acc.revenue + day.revenue,
-          clicks: acc.clicks + day.clicks,
-          impressions: acc.impressions + day.impressions,
-          roas: 0, // Will calculate after
-        }),
-        { spend: 0, revenue: 0, clicks: 0, impressions: 0, roas: 0 },
-      );
+      const sumData = (data: any[]) =>
+        data.reduce(
+          (acc, day) => ({
+            spend: acc.spend + day.spend,
+            revenue: acc.revenue + day.revenue,
+            clicks: acc.clicks + day.clicks,
+            impressions: acc.impressions + day.impressions,
+            roas: 0,
+          }),
+          { spend: 0, revenue: 0, clicks: 0, impressions: 0, roas: 0 },
+        );
 
       const currentSums = sumData(currentData);
       currentSums.roas = currentSums.spend > 0 ? currentSums.revenue / currentSums.spend : 0;
@@ -301,7 +676,6 @@ export class FacebookService {
       };
     } catch (error) {
       this.logger.error(`[getDailyInsights] Error fetching insights: ${error}`);
-      // Return empty data on error instead of crashing
       return {
         data: { current: [], previous: null },
         summaryStats: {
@@ -314,60 +688,296 @@ export class FacebookService {
       };
     }
   }
-  private getDateRange(dateRange: string): { startDate: string; endDate: string; dayCount: number } {
+  private getDateRange(dateRange: string): {
+    startDate: string;
+    endDate: string;
+    dayCount: number;
+  } {
+    const customRange = this.parseCustomDateRange(dateRange);
+    if (customRange) {
+      const start = new Date(`${customRange.since}T00:00:00.000Z`);
+      const end = new Date(`${customRange.until}T00:00:00.000Z`);
+      const dayCount = Math.max(
+        1,
+        Math.floor((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) +
+          1,
+      );
+      return {
+        startDate: customRange.since,
+        endDate: customRange.until,
+        dayCount,
+      };
+    }
+
     const endDate = new Date();
-    const startDate = new Date();
+    const startDate = new Date(endDate);
     let dayCount = 30;
 
     switch (dateRange) {
+      case 'today':
+        dayCount = 1;
+        break;
+      case 'yesterday':
+        startDate.setDate(endDate.getDate() - 1);
+        endDate.setDate(endDate.getDate() - 1);
+        dayCount = 1;
+        break;
       case 'last_7d':
-        startDate.setDate(endDate.getDate() - 7);
+        startDate.setDate(endDate.getDate() - 6);
         dayCount = 7;
         break;
       case 'last_14d':
-        startDate.setDate(endDate.getDate() - 14);
+        startDate.setDate(endDate.getDate() - 13);
         dayCount = 14;
         break;
       case 'last_30d':
-        startDate.setDate(endDate.getDate() - 30);
+        startDate.setDate(endDate.getDate() - 29);
         dayCount = 30;
         break;
       case 'last_90d':
-        startDate.setDate(endDate.getDate() - 90);
+        startDate.setDate(endDate.getDate() - 89);
         dayCount = 90;
         break;
+      case 'last_6m':
+        startDate.setDate(endDate.getDate() - 179);
+        dayCount = 180;
+        break;
+      case 'last_year':
+      case 'last_12m':
+        startDate.setDate(endDate.getDate() - 364);
+        dayCount = 365;
+        break;
+      case 'this_month':
+        startDate.setDate(1);
+        dayCount =
+          Math.floor(
+            (endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24),
+          ) + 1;
+        break;
+      case 'last_month': {
+        const firstDayCurrentMonth = new Date(
+          endDate.getFullYear(),
+          endDate.getMonth(),
+          1,
+        );
+        const firstDayLastMonth = new Date(
+          firstDayCurrentMonth.getFullYear(),
+          firstDayCurrentMonth.getMonth() - 1,
+          1,
+        );
+        const lastDayLastMonth = new Date(
+          firstDayCurrentMonth.getFullYear(),
+          firstDayCurrentMonth.getMonth(),
+          0,
+        );
+        startDate.setTime(firstDayLastMonth.getTime());
+        endDate.setTime(lastDayLastMonth.getTime());
+        dayCount =
+          Math.floor(
+            (endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24),
+          ) + 1;
+        break;
+      }
       default:
-        startDate.setDate(endDate.getDate() - 30);
+        startDate.setDate(endDate.getDate() - 29);
         dayCount = 30;
     }
 
     return {
-      startDate: startDate.toISOString().split('T')[0],
-      endDate: endDate.toISOString().split('T')[0],
+      startDate: this.formatDateForApi(startDate),
+      endDate: this.formatDateForApi(endDate),
       dayCount,
     };
   }
 
-  private getDatePresetAndDays(dateRange: string): { datePreset: string; dayCount: number } {
-    switch (dateRange) {
-      case 'last_7d':
-        return { datePreset: 'last_7d', dayCount: 7 };
-      case 'last_14d':
-        return { datePreset: 'last_14d', dayCount: 14 };
-      case 'last_30d':
-        return { datePreset: 'last_30d', dayCount: 30 };
-      case 'last_90d':
-        return { datePreset: 'last_90d', dayCount: 90 };
-      default:
-        return { datePreset: 'last_30d', dayCount: 30 };
+  private getDateParams(dateRange: string): Record<string, string> {
+    const customRange = this.parseCustomDateRange(dateRange);
+    if (customRange) {
+      return { time_range: JSON.stringify(customRange) };
+    }
+
+    if (
+      dateRange === 'last_6m' ||
+      dateRange === 'last_year' ||
+      dateRange === 'last_12m'
+    ) {
+      const { startDate, endDate } = this.getDateRange(dateRange);
+      return {
+        time_range: JSON.stringify({
+          since: startDate,
+          until: endDate,
+        }),
+      };
+    }
+
+    return { date_preset: this.getDatePreset(dateRange) };
+  }
+
+  private getInsightsDateSpecifier(dateRange: string): string {
+    const dateParams = this.getDateParams(dateRange);
+    if (dateParams.time_range) {
+      return `time_range(${dateParams.time_range})`;
+    }
+
+    return `date_preset(${dateParams.date_preset || 'last_30d'})`;
+  }
+
+  private parseCustomDateRange(
+    dateRange: string,
+  ): { since: string; until: string } | null {
+    if (!dateRange || typeof dateRange !== 'string') {
+      return null;
+    }
+
+    const trimmed = dateRange.trim();
+    if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(trimmed);
+      const since = typeof parsed?.since === 'string' ? parsed.since : '';
+      const until = typeof parsed?.until === 'string' ? parsed.until : '';
+      if (!since || !until) return null;
+
+      const sinceDate = new Date(`${since}T00:00:00.000Z`);
+      const untilDate = new Date(`${until}T00:00:00.000Z`);
+      if (Number.isNaN(sinceDate.getTime()) || Number.isNaN(untilDate.getTime())) {
+        return null;
+      }
+
+      return {
+        since,
+        until,
+      };
+    } catch {
+      return null;
     }
   }
-  private calculateRevenue(actions: any[] | undefined): number {
-    if (!actions) return 0;
-    const purchaseActions = actions.filter(
-      (a: any) => a.action_type === 'purchase' || a.action_type === 'omni_purchase',
+
+  private formatDateForApi(date: Date): string {
+    return date.toISOString().split('T')[0];
+  }
+
+  private parseNumeric(value: unknown): number {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string') {
+      const parsed = parseFloat(value);
+      return Number.isNaN(parsed) ? 0 : parsed;
+    }
+    return 0;
+  }
+
+  private parseInteger(value: unknown): number {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return Math.trunc(value);
+    }
+    if (typeof value === 'string') {
+      const parsed = parseInt(value, 10);
+      return Number.isNaN(parsed) ? 0 : parsed;
+    }
+    return 0;
+  }
+
+  private parsePercent(value: unknown): number {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string') {
+      const cleaned = value.replace('%', '').trim();
+      const parsed = parseFloat(cleaned);
+      return Number.isNaN(parsed) ? 0 : parsed;
+    }
+    return 0;
+  }
+
+  private isPurchaseActionType(actionType: unknown): boolean {
+    if (typeof actionType !== 'string') return false;
+    return (
+      actionType === 'purchase' ||
+      actionType === 'omni_purchase' ||
+      actionType === 'offsite_conversion.fb_pixel_purchase' ||
+      actionType === 'offsite_conversion.purchase'
     );
-    return purchaseActions.reduce((sum: number, a: any) => sum + parseFloat(a.value || '0'), 0);
+  }
+
+  private calculateRevenue(
+    actions: any[] | undefined,
+    actionValues: any[] | undefined = [],
+  ): number {
+    const valueSource = Array.isArray(actionValues) ? actionValues : [];
+    const revenueFromActionValues = valueSource
+      .filter((item: any) => this.isPurchaseActionType(item?.action_type))
+      .reduce(
+        (sum: number, item: any) => sum + this.parseNumeric(item?.value),
+        0,
+      );
+
+    if (revenueFromActionValues > 0) {
+      return revenueFromActionValues;
+    }
+
+    const actionSource = Array.isArray(actions) ? actions : [];
+    return actionSource
+      .filter((item: any) => this.isPurchaseActionType(item?.action_type))
+      .reduce(
+        (sum: number, item: any) => sum + this.parseNumeric(item?.value),
+        0,
+      );
+  }
+
+  private calculateConversions(actions: any[] | undefined): number {
+    const actionSource = Array.isArray(actions) ? actions : [];
+    return actionSource
+      .filter((item: any) => this.isPurchaseActionType(item?.action_type))
+      .reduce(
+        (sum: number, item: any) => sum + this.parseNumeric(item?.value),
+        0,
+      );
+  }
+
+  private getZeroMetrics() {
+    return {
+      clicks: 0,
+      impressions: 0,
+      reach: 0,
+      spend: 0,
+      cpc: 0,
+      cpm: 0,
+      ctr: 0,
+      revenue: 0,
+      conversions: 0,
+      roas: 0,
+    };
+  }
+
+  private extractMetrics(insight: any) {
+    const clicks = this.parseInteger(insight?.clicks);
+    const impressions = this.parseInteger(insight?.impressions);
+    const reach = this.parseInteger(insight?.reach);
+    const spend = this.parseNumeric(insight?.spend);
+    const revenue = this.calculateRevenue(insight?.actions, insight?.action_values);
+    const conversions = this.calculateConversions(insight?.actions);
+
+    const ctrRaw = this.parsePercent(insight?.ctr);
+    const cpcRaw = this.parseNumeric(insight?.cpc);
+    const cpmRaw = this.parseNumeric(insight?.cpm);
+
+    const ctr = ctrRaw > 0 ? ctrRaw : impressions > 0 ? (clicks / impressions) * 100 : 0;
+    const cpc = cpcRaw > 0 ? cpcRaw : clicks > 0 ? spend / clicks : 0;
+    const cpm = cpmRaw > 0 ? cpmRaw : impressions > 0 ? (spend / impressions) * 1000 : 0;
+    const roas = spend > 0 ? revenue / spend : 0;
+
+    return {
+      clicks,
+      impressions,
+      reach,
+      spend,
+      cpc,
+      cpm,
+      ctr,
+      revenue,
+      conversions,
+      roas,
+    };
   }
 
   async getCreatives(
@@ -375,7 +985,7 @@ export class FacebookService {
     accessToken: string,
     dateRange: string = 'last_30d',
   ): Promise<any[]> {
-    const datePreset = this.getDatePreset(dateRange);
+    const insightsDateSpecifier = this.getInsightsDateSpecifier(dateRange);
 
     // Fetch ads with creative details and insights
     // We use ads endpoint to get creative usage context (campaign, adset) and performance
@@ -390,7 +1000,7 @@ export class FacebookService {
           'creative{id,name,thumbnail_url,image_url,object_story_spec,asset_feed_spec,video_id}',
           'campaign{name}',
           'adset{name}',
-          `insights.date_preset(${datePreset}){spend,clicks,impressions,ctr,cpc,actions,action_values,reach,frequency}`,
+          `insights.${insightsDateSpecifier}{spend,clicks,impressions,ctr,cpc,actions,action_values,reach,frequency}`,
         ].join(','),
         limit: '50',
       },
@@ -524,14 +1134,14 @@ export class FacebookService {
     accessToken: string,
     dateRange: string,
   ): Promise<any> {
-    const datePreset = this.getDatePreset(dateRange);
+    const dateParams = this.getDateParams(dateRange);
 
     const result = await this.makeGraphApiCall(
       `/act_${adAccountId}/insights`,
       accessToken,
       {
         fields: 'impressions,clicks,spend,actions',
-        date_preset: datePreset,
+        ...dateParams,
         breakdowns: 'age,gender',
       },
     );
@@ -700,7 +1310,7 @@ export class FacebookService {
     accessToken: string,
     dateRange: string,
   ): Promise<any> {
-    const datePreset = this.getDatePreset(dateRange);
+    const dateParams = this.getDateParams(dateRange);
 
     const result = await this.makeGraphApiCall(
       `/act_${adAccountId}/adsets`,
@@ -723,7 +1333,7 @@ export class FacebookService {
           'adset_id,impressions,clicks,spend,reach,frequency,cpc,cpm,ctr,actions,action_values',
         level: 'adset',
         time_increment: 'all_days',
-        date_preset: datePreset,
+        ...dateParams,
         limit: '50',
       },
     );
