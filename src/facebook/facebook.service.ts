@@ -88,6 +88,50 @@ export class FacebookService {
     }
   }
 
+  private isReduceDataError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return (
+      message.includes(
+        "Please reduce the amount of data you're asking for, then retry your request",
+      ) ||
+      message.toLowerCase().includes('reduce the amount of data')
+    );
+  }
+
+  private async makeGraphApiCallWithAdaptiveLimit(
+    endpoint: string,
+    accessToken: string,
+    baseParams: Record<string, string>,
+    fallbackLimits: number[],
+  ): Promise<any> {
+    const requestedLimit = Number.parseInt(baseParams.limit || '', 10);
+    const adaptiveLimits = [
+      ...(Number.isFinite(requestedLimit) ? [requestedLimit] : []),
+      ...fallbackLimits,
+    ].filter((value, index, list) => Number.isFinite(value) && value > 0 && list.indexOf(value) === index);
+
+    let lastError: unknown = null;
+
+    for (const limit of adaptiveLimits) {
+      try {
+        return await this.makeGraphApiCall(endpoint, accessToken, {
+          ...baseParams,
+          limit: String(limit),
+        });
+      } catch (error) {
+        lastError = error;
+        if (!this.isReduceDataError(error)) {
+          throw error;
+        }
+        this.logger.warn(
+          `[FacebookService] Query too large for ${endpoint}; retrying with lower limit (${limit}).`,
+        );
+      }
+    }
+
+    throw lastError || new Error(`Failed adaptive Graph API call for ${endpoint}`);
+  }
+
   async getAdAccounts(accessToken: string): Promise<any[]> {
     const result = await this.makeGraphApiCall('/me/adaccounts', accessToken, {
       fields: 'id,name,account_status,currency,timezone_name',
@@ -103,15 +147,21 @@ export class FacebookService {
   ): Promise<any> {
     const dateParams = this.getDateParams(dateRange);
 
-    const adsResult = await this.makeGraphApiCall(
+    const adsResult = await this.makeGraphApiCallWithAdaptiveLimit(
       `/act_${adAccountId}/ads`,
       accessToken,
       {
         fields:
           'id,name,status,adset_id,campaign_id,creative{id,name,thumbnail_url,image_url}',
-        limit: '200',
+        limit: '100',
       },
-    );
+      [80, 60, 40, 25],
+    ).catch((error) => {
+      this.logger.warn(
+        `[FacebookService] Unable to fetch ads list for ${adAccountId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return { data: [], paging: null };
+    });
 
     const [
       accountResult,
@@ -124,41 +174,41 @@ export class FacebookService {
       this.makeGraphApiCall(`/act_${adAccountId}`, accessToken, {
         fields: 'id,name,account_status,currency,timezone_name',
       }).catch(() => null),
-      this.makeGraphApiCall(`/act_${adAccountId}/insights`, accessToken, {
+      this.makeGraphApiCallWithAdaptiveLimit(`/act_${adAccountId}/insights`, accessToken, {
         fields:
           'ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,impressions,clicks,spend,ctr,cpc,cpm,reach,actions,action_values',
         level: 'ad',
         time_increment: 'all_days',
-        limit: '500',
+        limit: '250',
         ...dateParams,
-      }).catch(() => ({ data: [] })),
-      this.makeGraphApiCall(`/act_${adAccountId}/campaigns`, accessToken, {
+      }, [200, 150, 100, 75, 50]).catch(() => ({ data: [] })),
+      this.makeGraphApiCallWithAdaptiveLimit(`/act_${adAccountId}/campaigns`, accessToken, {
         fields: 'id,name,status,objective',
-        limit: '200',
-      }).catch(() => ({ data: [] })),
-      this.makeGraphApiCall(`/act_${adAccountId}/insights`, accessToken, {
+        limit: '120',
+      }, [100, 80, 60, 40]).catch(() => ({ data: [] })),
+      this.makeGraphApiCallWithAdaptiveLimit(`/act_${adAccountId}/insights`, accessToken, {
         fields:
           'campaign_id,campaign_name,impressions,clicks,spend,ctr,cpc,cpm,reach,actions,action_values',
         level: 'campaign',
         time_increment: 'all_days',
-        limit: '200',
+        limit: '120',
         ...dateParams,
-      }).catch(() => ({ data: [] })),
-      this.makeGraphApiCall(`/act_${adAccountId}/insights`, accessToken, {
+      }, [100, 80, 60, 40]).catch(() => ({ data: [] })),
+      this.makeGraphApiCallWithAdaptiveLimit(`/act_${adAccountId}/insights`, accessToken, {
         fields: 'impressions,clicks,spend,ctr,cpc,cpm,reach,actions,action_values',
         level: 'account',
         time_increment: '1',
-        limit: '400',
+        limit: '180',
         ...dateParams,
-      }).catch(() => ({ data: [] })),
-      this.makeGraphApiCall(`/act_${adAccountId}/insights`, accessToken, {
+      }, [140, 100, 70, 40]).catch(() => ({ data: [] })),
+      this.makeGraphApiCallWithAdaptiveLimit(`/act_${adAccountId}/insights`, accessToken, {
         fields: 'impressions,clicks,spend,ctr,cpc,cpm,reach,actions,action_values',
         level: 'account',
         breakdowns: 'publisher_platform',
         time_increment: 'all_days',
-        limit: '100',
+        limit: '60',
         ...dateParams,
-      }).catch(() => ({ data: [] })),
+      }, [50, 40, 30, 20]).catch(() => ({ data: [] })),
     ]);
 
     const adInsightsById = new Map<string, any>();
