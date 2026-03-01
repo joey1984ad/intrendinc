@@ -70,6 +70,12 @@ export const stripeSpecialUsersConfig = specialUsers.reduce((acc, email) => {
     tiktokStarterAnnualPriceId: devConfig.STRIPE_TIKTOK_STARTER_ANNUAL_PRICE_ID,
     tiktokProMonthlyPriceId: devConfig.STRIPE_TIKTOK_PRO_MONTHLY_PRICE_ID,
     tiktokProAnnualPriceId: devConfig.STRIPE_TIKTOK_PRO_ANNUAL_PRICE_ID,
+
+    // Google Ads Price IDs
+    googleAdsStarterMonthlyPriceId: devConfig.STRIPE_GOOGLE_ADS_STARTER_MONTHLY_PRICE_ID,
+    googleAdsStarterAnnualPriceId: devConfig.STRIPE_GOOGLE_ADS_STARTER_ANNUAL_PRICE_ID,
+    googleAdsProMonthlyPriceId: devConfig.STRIPE_GOOGLE_ADS_PRO_MONTHLY_PRICE_ID,
+    googleAdsProAnnualPriceId: devConfig.STRIPE_GOOGLE_ADS_PRO_ANNUAL_PRICE_ID,
     
     organizationBasicMonthlyPriceId: devConfig.STRIPE_ORGANIZATION_BASIC_MONTHLY_PRICE_ID,
     organizationBasicAnnualPriceId: devConfig.STRIPE_ORGANIZATION_BASIC_ANNUAL_PRICE_ID,

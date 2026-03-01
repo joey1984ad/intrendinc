@@ -1,12 +1,12 @@
 import { Injectable, Logger, UnauthorizedException, BadRequestException, ForbiddenException, Inject, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, MoreThan } from 'typeorm';
+import { Repository } from 'typeorm';
 import { GoogleAdsSession } from './entities/google-ads-session.entity';
-import { GoogleAdsMetricsCache } from './entities/google-ads-metrics-cache.entity';
 import { GoogleAdsCampaignData } from './entities/google-ads-campaign-data.entity';
-import { PlatformMetrics, PlatformCampaign, PlatformAdGroup, PlatformAd } from '../common/interfaces/ad-platform.interface';
-import { SubscriptionsService } from '../subscriptions/subscriptions.service';
+import { PlatformMetrics, PlatformCampaign, PlatformAdGroup, PlatformAd, AdPlatform } from '../common/interfaces/ad-platform.interface';
+import { PlatformSubscriptionsService } from '../subscriptions/platform-subscriptions.service';
+import { BigQueryService } from '../bigquery/bigquery.service';
 
 // Google Ads API base URL
 const GOOGLE_ADS_API_BASE = 'https://googleads.googleapis.com';
@@ -38,18 +38,15 @@ export class GoogleAdsService {
   private readonly redirectUri: string;
   private readonly apiVersion: string;
   private readonly scopes: string[];
-  private readonly cacheTtlHours: number;
-
   constructor(
     private readonly configService: ConfigService,
     @InjectRepository(GoogleAdsSession)
     private readonly sessionRepository: Repository<GoogleAdsSession>,
-    @InjectRepository(GoogleAdsMetricsCache)
-    private readonly metricsCacheRepository: Repository<GoogleAdsMetricsCache>,
     @InjectRepository(GoogleAdsCampaignData)
     private readonly campaignDataRepository: Repository<GoogleAdsCampaignData>,
-    @Inject(forwardRef(() => SubscriptionsService))
-    private readonly subscriptionsService: SubscriptionsService,
+    @Inject(forwardRef(() => PlatformSubscriptionsService))
+    private readonly platformSubscriptionsService: PlatformSubscriptionsService,
+    private readonly bigQueryService: BigQueryService,
   ) {
     const googleAdsConfig = this.configService.get('googleAds');
     this.clientId = googleAdsConfig?.clientId || '';
@@ -61,7 +58,6 @@ export class GoogleAdsService {
       'https://www.googleapis.com/auth/adwords',
       'https://www.googleapis.com/auth/userinfo.email',
     ];
-    this.cacheTtlHours = googleAdsConfig?.cacheTtlHours || 6;
   }
 
   // ==================== SUBSCRIPTION VALIDATION ====================
@@ -71,7 +67,7 @@ export class GoogleAdsService {
    * Uses the organization seats with platform='google'
    */
   async validateSubscription(userId: number): Promise<void> {
-    const seats = await this.subscriptionsService.getOrganizationSeats(userId, 'google');
+    const seats = await this.platformSubscriptionsService.getPlatformSeatsByUser(userId, AdPlatform.GOOGLE);
 
     if (seats.length === 0) {
       throw new ForbiddenException(
@@ -84,7 +80,7 @@ export class GoogleAdsService {
    * Check if user can access a specific Google Ads customer account
    */
   async validateCustomerAccess(userId: number, customerId: string): Promise<void> {
-    const seats = await this.subscriptionsService.getOrganizationSeats(userId, 'google');
+    const seats = await this.platformSubscriptionsService.getPlatformSeatsByUser(userId, AdPlatform.GOOGLE);
     const hasAccess = seats.some(seat => seat.adAccountId === customerId);
 
     if (!hasAccess) {
@@ -98,7 +94,7 @@ export class GoogleAdsService {
    * Get list of Google Ads accounts user has paid access to
    */
   async getPaidCustomerIds(userId: number): Promise<string[]> {
-    const seats = await this.subscriptionsService.getOrganizationSeats(userId, 'google');
+    const seats = await this.platformSubscriptionsService.getPlatformSeatsByUser(userId, AdPlatform.GOOGLE);
     return seats.map(seat => seat.adAccountId);
   }
 
@@ -109,7 +105,7 @@ export class GoogleAdsService {
     hasSubscription: boolean;
     paidAccounts?: { id: string; name: string; addedAt: Date }[];
   }> {
-    const seats = await this.subscriptionsService.getOrganizationSeats(userId, 'google');
+    const seats = await this.platformSubscriptionsService.getPlatformSeatsByUser(userId, AdPlatform.GOOGLE);
 
     if (seats.length === 0) {
       return { hasSubscription: false };
@@ -386,7 +382,7 @@ export class GoogleAdsService {
   // ==================== CAMPAIGNS ====================
 
   /**
-   * Get campaigns for the selected customer
+   * Get campaigns for the selected customer from BigQuery
    */
   async getCampaigns(
     userId: number,
@@ -398,51 +394,72 @@ export class GoogleAdsService {
       throw new UnauthorizedException('No valid session or customer selected');
     }
 
-    const dateClause = startDate && endDate
-      ? `WHERE segments.date BETWEEN '${startDate}' AND '${endDate}'`
-      : '';
+    if (!startDate || !endDate) {
+      throw new BadRequestException('startDate and endDate are required');
+    }
 
-    const query = `
-      SELECT 
-        campaign.id,
-        campaign.name,
-        campaign.status,
-        campaign.advertising_channel_type,
-        campaign.bidding_strategy_type,
-        campaign_budget.amount_micros,
-        campaign_budget.type,
-        campaign.start_date,
-        campaign.end_date,
-        metrics.impressions,
-        metrics.clicks,
-        metrics.cost_micros,
-        metrics.conversions,
-        metrics.conversions_value
-      FROM campaign
-      ${dateClause}
-      ORDER BY campaign.name
+    return this.getCampaignsFromBigQuery(userId, session.customerId, startDate, endDate);
+  }
+
+  /**
+   * Read campaigns from BigQuery (aggregated across dates)
+   * @internal
+   */
+  private async getCampaignsFromBigQuery(
+    userId: number,
+    customerId: string,
+    startDate: string,
+    endDate: string,
+  ): Promise<PlatformCampaign[]> {
+    const tableRef = this.bigQueryService.getTableRef('campaigns');
+    const sql = `
+      SELECT
+        campaign_id,
+        ANY_VALUE(name) as name,
+        ANY_VALUE(status) as status,
+        ANY_VALUE(channel_type) as channel_type,
+        ANY_VALUE(budget_micros) as budget_micros,
+        ANY_VALUE(budget_type) as budget_type,
+        ANY_VALUE(start_date) as start_date,
+        ANY_VALUE(end_date) as end_date,
+        SUM(impressions) as impressions,
+        SUM(clicks) as clicks,
+        SUM(cost_micros) as cost_micros,
+        SUM(conversions) as conversions,
+        SUM(conversions_value) as conversions_value
+      FROM ${tableRef}
+      WHERE user_id = @userId
+        AND customer_id = @customerId
+        AND date BETWEEN @startDate AND @endDate
+      GROUP BY campaign_id
+      ORDER BY name
     `;
 
-    const response = await this.makeSearchRequest(session, session.customerId, query);
+    const rows = await this.bigQueryService.query(sql, {
+      userId,
+      customerId,
+      startDate,
+      endDate,
+    });
 
-    return (response.results || []).map((result: any) => ({
-      id: result.campaign.id,
-      name: result.campaign.name,
-      status: result.campaign.status,
-      objective: result.campaign.advertisingChannelType,
-      budget: result.campaignBudget?.amountMicros ? result.campaignBudget.amountMicros / 1000000 : 0,
-      budgetType: result.campaignBudget?.type === 'DAILY' ? 'daily' : 'lifetime',
-      startTime: result.campaign.startDate ? new Date(result.campaign.startDate) : undefined,
-      endTime: result.campaign.endDate ? new Date(result.campaign.endDate) : undefined,
+    return rows.map((row: any) => ({
+      id: row.campaign_id,
+      name: row.name,
+      status: row.status,
+      objective: row.channel_type,
+      budget: row.budget_micros ? row.budget_micros / 1000000 : 0,
+      budgetType: row.budget_type === 'DAILY' ? 'daily' as const : 'lifetime' as const,
+      startTime: row.start_date ? new Date(row.start_date) : undefined,
+      endTime: row.end_date ? new Date(row.end_date) : undefined,
       metrics: {
-        impressions: parseInt(result.metrics?.impressions || '0', 10),
-        clicks: parseInt(result.metrics?.clicks || '0', 10),
-        spend: (result.metrics?.costMicros || 0) / 1000000,
-        conversions: parseFloat(result.metrics?.conversions || '0'),
-        ctr: this.calculateCtr(result.metrics?.clicks, result.metrics?.impressions),
-        cpc: this.calculateCpc(result.metrics?.costMicros, result.metrics?.clicks),
-        cpm: this.calculateCpm(result.metrics?.costMicros, result.metrics?.impressions),
-        roas: this.calculateRoas(result.metrics?.conversionsValue, result.metrics?.costMicros),
+        impressions: row.impressions || 0,
+        clicks: row.clicks || 0,
+        spend: (row.cost_micros || 0) / 1000000,
+        conversions: row.conversions || 0,
+        ctr: this.calculateCtr(row.clicks, row.impressions),
+        cpc: this.calculateCpc(row.cost_micros, row.clicks),
+        cpm: this.calculateCpm(row.cost_micros, row.impressions),
+        roas: this.calculateRoas(row.conversions_value, row.cost_micros),
       },
     }));
   }
@@ -497,7 +514,7 @@ export class GoogleAdsService {
   // ==================== AD GROUPS ====================
 
   /**
-   * Get ad groups
+   * Get ad groups from BigQuery
    */
   async getAdGroups(
     userId: number,
@@ -510,49 +527,69 @@ export class GoogleAdsService {
       throw new UnauthorizedException('No valid session or customer selected');
     }
 
-    const whereClauses: string[] = [];
-    if (campaignId) {
-      whereClauses.push(`campaign.id = ${campaignId}`);
-    }
-    if (startDate && endDate) {
-      whereClauses.push(`segments.date BETWEEN '${startDate}' AND '${endDate}'`);
+    if (!startDate || !endDate) {
+      throw new BadRequestException('startDate and endDate are required');
     }
 
-    const whereClause = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+    return this.getAdGroupsFromBigQuery(userId, session.customerId, campaignId, startDate, endDate);
+  }
 
-    const query = `
-      SELECT 
-        ad_group.id,
-        ad_group.name,
-        ad_group.status,
-        ad_group.type,
-        campaign.id,
-        ad_group.cpc_bid_micros,
-        metrics.impressions,
-        metrics.clicks,
-        metrics.cost_micros,
-        metrics.conversions
-      FROM ad_group
-      ${whereClause}
-      ORDER BY ad_group.name
+  /**
+   * Read ad groups from BigQuery (aggregated across dates)
+   */
+  private async getAdGroupsFromBigQuery(
+    userId: number,
+    customerId: string,
+    campaignId: string | undefined,
+    startDate: string,
+    endDate: string,
+  ): Promise<PlatformAdGroup[]> {
+    const tableRef = this.bigQueryService.getTableRef('ad_groups');
+    let sql = `
+      SELECT
+        ad_group_id,
+        ANY_VALUE(campaign_id) as campaign_id,
+        ANY_VALUE(name) as name,
+        ANY_VALUE(status) as status,
+        ANY_VALUE(cpc_bid_micros) as cpc_bid_micros,
+        SUM(impressions) as impressions,
+        SUM(clicks) as clicks,
+        SUM(cost_micros) as cost_micros,
+        SUM(conversions) as conversions
+      FROM ${tableRef}
+      WHERE user_id = @userId
+        AND customer_id = @customerId
+        AND date BETWEEN @startDate AND @endDate
     `;
 
-    const response = await this.makeSearchRequest(session, session.customerId, query);
+    const params: Record<string, any> = { userId, customerId, startDate, endDate };
 
-    return (response.results || []).map((result: any) => ({
-      id: result.adGroup.id,
-      campaignId: result.campaign.id,
-      name: result.adGroup.name,
-      status: result.adGroup.status,
-      bidAmount: result.adGroup.cpcBidMicros ? result.adGroup.cpcBidMicros / 1000000 : 0,
+    if (campaignId) {
+      sql += `  AND campaign_id = @campaignId\n`;
+      params.campaignId = campaignId;
+    }
+
+    sql += `
+      GROUP BY ad_group_id
+      ORDER BY name
+    `;
+
+    const rows = await this.bigQueryService.query(sql, params);
+
+    return rows.map((row: any) => ({
+      id: row.ad_group_id,
+      campaignId: row.campaign_id,
+      name: row.name,
+      status: row.status,
+      bidAmount: row.cpc_bid_micros ? row.cpc_bid_micros / 1000000 : 0,
       metrics: {
-        impressions: parseInt(result.metrics?.impressions || '0', 10),
-        clicks: parseInt(result.metrics?.clicks || '0', 10),
-        spend: (result.metrics?.costMicros || 0) / 1000000,
-        conversions: parseFloat(result.metrics?.conversions || '0'),
-        ctr: this.calculateCtr(result.metrics?.clicks, result.metrics?.impressions),
-        cpc: this.calculateCpc(result.metrics?.costMicros, result.metrics?.clicks),
-        cpm: this.calculateCpm(result.metrics?.costMicros, result.metrics?.impressions),
+        impressions: row.impressions || 0,
+        clicks: row.clicks || 0,
+        spend: (row.cost_micros || 0) / 1000000,
+        conversions: row.conversions || 0,
+        ctr: this.calculateCtr(row.clicks, row.impressions),
+        cpc: this.calculateCpc(row.cost_micros, row.clicks),
+        cpm: this.calculateCpm(row.cost_micros, row.impressions),
       },
     }));
   }
@@ -560,7 +597,7 @@ export class GoogleAdsService {
   // ==================== ADS ====================
 
   /**
-   * Get ads
+   * Get ads from BigQuery
    */
   async getAds(
     userId: number,
@@ -573,50 +610,69 @@ export class GoogleAdsService {
       throw new UnauthorizedException('No valid session or customer selected');
     }
 
-    const whereClauses: string[] = [];
-    if (adGroupId) {
-      whereClauses.push(`ad_group.id = ${adGroupId}`);
-    }
-    if (startDate && endDate) {
-      whereClauses.push(`segments.date BETWEEN '${startDate}' AND '${endDate}'`);
+    if (!startDate || !endDate) {
+      throw new BadRequestException('startDate and endDate are required');
     }
 
-    const whereClause = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+    return this.getAdsFromBigQuery(userId, session.customerId, adGroupId, startDate, endDate);
+  }
 
-    const query = `
-      SELECT 
-        ad_group_ad.ad.id,
-        ad_group_ad.ad.name,
-        ad_group_ad.ad.type,
-        ad_group_ad.status,
-        ad_group.id,
-        campaign.id,
-        ad_group_ad.ad.final_urls,
-        metrics.impressions,
-        metrics.clicks,
-        metrics.cost_micros,
-        metrics.conversions
-      FROM ad_group_ad
-      ${whereClause}
-      ORDER BY ad_group_ad.ad.name
+  /**
+   * Read ads from BigQuery (aggregated across dates)
+   */
+  private async getAdsFromBigQuery(
+    userId: number,
+    customerId: string,
+    adGroupId: string | undefined,
+    startDate: string,
+    endDate: string,
+  ): Promise<PlatformAd[]> {
+    const tableRef = this.bigQueryService.getTableRef('ads');
+    let sql = `
+      SELECT
+        ad_id,
+        ANY_VALUE(ad_group_id) as ad_group_id,
+        ANY_VALUE(campaign_id) as campaign_id,
+        ANY_VALUE(name) as name,
+        ANY_VALUE(status) as status,
+        SUM(impressions) as impressions,
+        SUM(clicks) as clicks,
+        SUM(cost_micros) as cost_micros,
+        SUM(conversions) as conversions
+      FROM ${tableRef}
+      WHERE user_id = @userId
+        AND customer_id = @customerId
+        AND date BETWEEN @startDate AND @endDate
     `;
 
-    const response = await this.makeSearchRequest(session, session.customerId, query);
+    const params: Record<string, any> = { userId, customerId, startDate, endDate };
 
-    return (response.results || []).map((result: any) => ({
-      id: result.adGroupAd.ad.id,
-      adGroupId: result.adGroup.id,
-      campaignId: result.campaign.id,
-      name: result.adGroupAd.ad.name || `Ad ${result.adGroupAd.ad.id}`,
-      status: result.adGroupAd.status,
+    if (adGroupId) {
+      sql += `  AND ad_group_id = @adGroupId\n`;
+      params.adGroupId = adGroupId;
+    }
+
+    sql += `
+      GROUP BY ad_id
+      ORDER BY name
+    `;
+
+    const rows = await this.bigQueryService.query(sql, params);
+
+    return rows.map((row: any) => ({
+      id: row.ad_id,
+      adGroupId: row.ad_group_id,
+      campaignId: row.campaign_id,
+      name: row.name || `Ad ${row.ad_id}`,
+      status: row.status,
       metrics: {
-        impressions: parseInt(result.metrics?.impressions || '0', 10),
-        clicks: parseInt(result.metrics?.clicks || '0', 10),
-        spend: (result.metrics?.costMicros || 0) / 1000000,
-        conversions: parseFloat(result.metrics?.conversions || '0'),
-        ctr: this.calculateCtr(result.metrics?.clicks, result.metrics?.impressions),
-        cpc: this.calculateCpc(result.metrics?.costMicros, result.metrics?.clicks),
-        cpm: this.calculateCpm(result.metrics?.costMicros, result.metrics?.impressions),
+        impressions: row.impressions || 0,
+        clicks: row.clicks || 0,
+        spend: (row.cost_micros || 0) / 1000000,
+        conversions: row.conversions || 0,
+        ctr: this.calculateCtr(row.clicks, row.impressions),
+        cpc: this.calculateCpc(row.cost_micros, row.clicks),
+        cpm: this.calculateCpm(row.cost_micros, row.impressions),
       },
     }));
   }
@@ -624,7 +680,7 @@ export class GoogleAdsService {
   // ==================== METRICS ====================
 
   /**
-   * Get account-level metrics
+   * Get account-level metrics from BigQuery
    */
   async getAccountMetrics(
     userId: number,
@@ -636,80 +692,59 @@ export class GoogleAdsService {
       throw new UnauthorizedException('No valid session or customer selected');
     }
 
-    // Check cache first
-    const cacheKey = `${startDate}_${endDate}`;
-    const cached = await this.metricsCacheRepository.findOne({
-      where: {
-        userId,
-        customerId: session.customerId,
-        dateRange: cacheKey,
-        expiresAt: MoreThan(new Date()),
-      },
-    });
-
-    if (cached) {
-      return cached.metricsData;
-    }
-
-    const query = `
-      SELECT 
-        metrics.impressions,
-        metrics.clicks,
-        metrics.cost_micros,
-        metrics.conversions,
-        metrics.conversions_value
-      FROM customer
-      WHERE segments.date BETWEEN '${startDate}' AND '${endDate}'
-    `;
-
-    const response = await this.makeSearchRequest(session, session.customerId, query);
-
-    // Aggregate metrics
-    let totalImpressions = 0;
-    let totalClicks = 0;
-    let totalCostMicros = 0;
-    let totalConversions = 0;
-    let totalConversionsValue = 0;
-
-    for (const result of response.results || []) {
-      totalImpressions += parseInt(result.metrics?.impressions || '0', 10);
-      totalClicks += parseInt(result.metrics?.clicks || '0', 10);
-      totalCostMicros += parseInt(result.metrics?.costMicros || '0', 10);
-      totalConversions += parseFloat(result.metrics?.conversions || '0');
-      totalConversionsValue += parseFloat(result.metrics?.conversionsValue || '0');
-    }
-
-    const totalSpend = totalCostMicros / 1000000;
-
-    const metrics: PlatformMetrics = {
-      impressions: totalImpressions,
-      clicks: totalClicks,
-      spend: totalSpend,
-      conversions: totalConversions,
-      ctr: this.calculateCtr(totalClicks, totalImpressions),
-      cpc: this.calculateCpc(totalCostMicros, totalClicks),
-      cpm: this.calculateCpm(totalCostMicros, totalImpressions),
-      roas: totalSpend > 0 ? totalConversionsValue / totalSpend : 0,
-      costPerConversion: totalConversions > 0 ? totalSpend / totalConversions : 0,
-    };
-
-    // Cache the results
-    const cacheExpiry = new Date();
-    cacheExpiry.setHours(cacheExpiry.getHours() + this.cacheTtlHours);
-
-    await this.metricsCacheRepository.save({
-      userId,
-      customerId: session.customerId,
-      dateRange: cacheKey,
-      metricsData: metrics as any,
-      expiresAt: cacheExpiry,
-    });
-
-    return metrics;
+    return this.getAccountMetricsFromBigQuery(userId, session.customerId, startDate, endDate);
   }
 
   /**
-   * Get metrics by date (for charts)
+   * Read account-level metrics from BigQuery
+   */
+  private async getAccountMetricsFromBigQuery(
+    userId: number,
+    customerId: string,
+    startDate: string,
+    endDate: string,
+  ): Promise<PlatformMetrics> {
+    const tableRef = this.bigQueryService.getTableRef('daily_account_metrics');
+    const sql = `
+      SELECT
+        SUM(impressions) as impressions,
+        SUM(clicks) as clicks,
+        SUM(cost_micros) as cost_micros,
+        SUM(conversions) as conversions,
+        SUM(conversions_value) as conversions_value
+      FROM ${tableRef}
+      WHERE user_id = @userId
+        AND customer_id = @customerId
+        AND date BETWEEN @startDate AND @endDate
+    `;
+
+    const rows = await this.bigQueryService.query(sql, {
+      userId,
+      customerId,
+      startDate,
+      endDate,
+    });
+
+    const row = rows[0] || {};
+    const totalSpend = (row.cost_micros || 0) / 1000000;
+    const totalConversions = row.conversions || 0;
+    const totalConversionsValue = row.conversions_value || 0;
+
+    return {
+      impressions: row.impressions || 0,
+      clicks: row.clicks || 0,
+      spend: totalSpend,
+      conversions: totalConversions,
+      ctr: this.calculateCtr(row.clicks, row.impressions),
+      cpc: this.calculateCpc(row.cost_micros, row.clicks),
+      cpm: this.calculateCpm(row.cost_micros, row.impressions),
+      roas: totalSpend > 0 ? totalConversionsValue / totalSpend : 0,
+      costPerConversion: totalConversions > 0 ? totalSpend / totalConversions : 0,
+    };
+  }
+
+  /**
+   * Get metrics by date (for charts) from BigQuery
    */
   async getMetricsByDate(
     userId: number,
@@ -721,59 +756,59 @@ export class GoogleAdsService {
       throw new UnauthorizedException('No valid session or customer selected');
     }
 
-    const query = `
-      SELECT 
-        segments.date,
-        metrics.impressions,
-        metrics.clicks,
-        metrics.cost_micros,
-        metrics.conversions,
-        metrics.conversions_value
-      FROM customer
-      WHERE segments.date BETWEEN '${startDate}' AND '${endDate}'
-      ORDER BY segments.date
+    return this.getMetricsByDateFromBigQuery(userId, session.customerId, startDate, endDate);
+  }
+
+  /**
+   * Read daily metrics from BigQuery
+   */
+  private async getMetricsByDateFromBigQuery(
+    userId: number,
+    customerId: string,
+    startDate: string,
+    endDate: string,
+  ): Promise<{ date: string; metrics: PlatformMetrics }[]> {
+    const tableRef = this.bigQueryService.getTableRef('daily_account_metrics');
+    const sql = `
+      SELECT
+        date,
+        SUM(impressions) as impressions,
+        SUM(clicks) as clicks,
+        SUM(cost_micros) as cost_micros,
+        SUM(conversions) as conversions,
+        SUM(conversions_value) as conversions_value
+      FROM ${tableRef}
+      WHERE user_id = @userId
+        AND customer_id = @customerId
+        AND date BETWEEN @startDate AND @endDate
+      GROUP BY date
+      ORDER BY date
     `;
 
-    const response = await this.makeSearchRequest(session, session.customerId, query);
+    const rows = await this.bigQueryService.query(sql, {
+      userId,
+      customerId,
+      startDate,
+      endDate,
+    });
 
-    // Group by date
-    const dateMetrics: Map<string, any> = new Map();
-
-    for (const result of response.results || []) {
-      const date = result.segments?.date;
-      if (!date) continue;
-
-      if (!dateMetrics.has(date)) {
-        dateMetrics.set(date, {
-          impressions: 0,
-          clicks: 0,
-          costMicros: 0,
-          conversions: 0,
-          conversionsValue: 0,
-        });
-      }
-
-      const current = dateMetrics.get(date);
-      current.impressions += parseInt(result.metrics?.impressions || '0', 10);
-      current.clicks += parseInt(result.metrics?.clicks || '0', 10);
-      current.costMicros += parseInt(result.metrics?.costMicros || '0', 10);
-      current.conversions += parseFloat(result.metrics?.conversions || '0');
-      current.conversionsValue += parseFloat(result.metrics?.conversionsValue || '0');
-    }
-
-    return Array.from(dateMetrics.entries()).map(([date, data]) => ({
-      date,
-      metrics: {
-        impressions: data.impressions,
-        clicks: data.clicks,
-        spend: data.costMicros / 1000000,
-        conversions: data.conversions,
-        ctr: this.calculateCtr(data.clicks, data.impressions),
-        cpc: this.calculateCpc(data.costMicros, data.clicks),
-        cpm: this.calculateCpm(data.costMicros, data.impressions),
-        roas: data.costMicros > 0 ? data.conversionsValue / (data.costMicros / 1000000) : 0,
-      },
-    }));
+    return rows.map((row: any) => {
+      // BigQuery DATE type returns as { value: 'YYYY-MM-DD' } object
+      const dateStr = typeof row.date === 'object' && row.date?.value ? row.date.value : String(row.date);
+      return {
+        date: dateStr,
+        metrics: {
+          impressions: row.impressions || 0,
+          clicks: row.clicks || 0,
+          spend: (row.cost_micros || 0) / 1000000,
+          conversions: row.conversions || 0,
+          ctr: this.calculateCtr(row.clicks, row.impressions),
+          cpc: this.calculateCpc(row.cost_micros, row.clicks),
+          cpm: this.calculateCpm(row.cost_micros, row.impressions),
+          roas: row.cost_micros > 0 ? (row.conversions_value || 0) / ((row.cost_micros || 0) / 1000000) : 0,
+        },
+      };
+    });
   }
 
   // ==================== HELPER METHODS ====================

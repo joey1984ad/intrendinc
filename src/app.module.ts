@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { ScheduleModule } from '@nestjs/schedule';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { DatabaseModule } from './database/database.module';
@@ -12,6 +13,7 @@ import { TikTokModule } from './tiktok/tiktok.module';
 import { GoogleAdsModule } from './google-ads/google-ads.module';
 import { AiModule } from './ai/ai.module';
 import { ShareableLinksModule } from './shareable-links/shareable-links.module';
+import { BigQueryModule } from './bigquery/bigquery.module';
 import { HealthController } from './common/health.controller';
 import { ProxyImageController, ProxyImageBatchController } from './common/proxy-image.controller';
 import { databaseConfig } from './config/database.config';
@@ -19,6 +21,7 @@ import { stripeConfig } from './config/stripe.config';
 import { facebookConfig } from './config/facebook.config';
 import { tiktokConfig } from './config/tiktok.config';
 import googleAdsConfig from './config/google-ads.config';
+import bigqueryConfig from './config/bigquery.config';
 import { authConfig } from './config/auth.config';
 import { aiConfig } from './config/ai.config';
 
@@ -26,8 +29,9 @@ import { aiConfig } from './config/ai.config';
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      load: [databaseConfig, stripeConfig, facebookConfig, tiktokConfig, googleAdsConfig, authConfig, aiConfig],
+      load: [databaseConfig, stripeConfig, facebookConfig, tiktokConfig, googleAdsConfig, bigqueryConfig, authConfig, aiConfig],
     }),
+    ScheduleModule.forRoot(),
     DatabaseModule,
     UsersModule,
     AuthModule,
@@ -38,6 +42,7 @@ import { aiConfig } from './config/ai.config';
     GoogleAdsModule,
     AiModule,
     ShareableLinksModule,
+    BigQueryModule,
   ],
   controllers: [AppController, HealthController, ProxyImageController, ProxyImageBatchController],
   providers: [AppService],

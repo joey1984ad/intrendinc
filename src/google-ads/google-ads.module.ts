@@ -7,6 +7,8 @@ import { GoogleAdsSession } from './entities/google-ads-session.entity';
 import { GoogleAdsMetricsCache } from './entities/google-ads-metrics-cache.entity';
 import { GoogleAdsCampaignData } from './entities/google-ads-campaign-data.entity';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
+// SubscriptionsModule exports both SubscriptionsService and PlatformSubscriptionsService
+import { BigQueryModule } from '../bigquery/bigquery.module';
 import googleAdsConfig from '../config/google-ads.config';
 
 @Module({
@@ -18,6 +20,7 @@ import googleAdsConfig from '../config/google-ads.config';
       GoogleAdsCampaignData,
     ]),
     forwardRef(() => SubscriptionsModule),
+    BigQueryModule,
   ],
   controllers: [GoogleAdsController],
   providers: [GoogleAdsService],

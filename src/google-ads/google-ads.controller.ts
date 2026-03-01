@@ -14,6 +14,7 @@ import {
 import type { Response, Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { GoogleAdsService } from './google-ads.service';
+import { GoogleAdsSyncService } from '../bigquery/google-ads-sync.service';
 import { ConfigService } from '@nestjs/config';
 
 interface AuthenticatedRequest extends Request {
@@ -24,6 +25,7 @@ interface AuthenticatedRequest extends Request {
 export class GoogleAdsController {
   constructor(
     private readonly googleAdsService: GoogleAdsService,
+    private readonly googleAdsSyncService: GoogleAdsSyncService,
     private readonly configService: ConfigService,
   ) {}
 
@@ -372,5 +374,80 @@ export class GoogleAdsController {
 
     const data = await this.googleAdsService.getMetricsByDate(req.user.id, since, until);
     return { success: true, data };
+  }
+
+  // ==================== BIGQUERY SYNC ====================
+
+  /**
+   * Trigger a manual sync of Google Ads data to BigQuery
+   */
+  @Post('sync')
+  @UseGuards(JwtAuthGuard)
+  async triggerSync(@Req() req: AuthenticatedRequest): Promise<{
+    success: boolean;
+    rowsSynced?: number;
+    error?: string;
+  }> {
+    if (!req.user?.id) {
+      throw new UnauthorizedException('Not authenticated');
+    }
+
+    try {
+      const result = await this.googleAdsSyncService.syncByUserId(req.user.id);
+      return { success: true, rowsSynced: result.rowsSynced };
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Get BigQuery sync status for the current user's account
+   */
+  @Get('sync/status')
+  @UseGuards(JwtAuthGuard)
+  async getSyncStatus(@Req() req: AuthenticatedRequest): Promise<{
+    success: boolean;
+    syncStatus?: {
+      lastSyncAt: Date | null;
+      lastSyncStatus: string;
+      rowsSynced: number;
+      errorMessage: string | null;
+      syncDurationMs: number | null;
+    };
+  }> {
+    if (!req.user?.id) {
+      throw new UnauthorizedException('Not authenticated');
+    }
+
+    const session = await this.googleAdsService.getSession(req.user.id);
+    if (!session || !session.customerId) {
+      return { success: true, syncStatus: undefined };
+    }
+
+    const status = await this.googleAdsSyncService.getSyncStatus(req.user.id, session.customerId);
+
+    if (!status) {
+      return {
+        success: true,
+        syncStatus: {
+          lastSyncAt: null,
+          lastSyncStatus: 'never',
+          rowsSynced: 0,
+          errorMessage: null,
+          syncDurationMs: null,
+        },
+      };
+    }
+
+    return {
+      success: true,
+      syncStatus: {
+        lastSyncAt: status.lastSyncAt,
+        lastSyncStatus: status.lastSyncStatus,
+        rowsSynced: status.rowsSynced,
+        errorMessage: status.errorMessage,
+        syncDurationMs: status.syncDurationMs,
+      },
+    };
   }
 }

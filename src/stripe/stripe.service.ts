@@ -418,20 +418,10 @@ export class StripeService implements OnModuleInit {
     switch (platform) {
       case AdPlatform.GOOGLE:
         if (specialConfig) {
-             // We don't have special config for Google Ads yet in the hardcoded list, 
-             // but we will use the standard logic structure.
-             // If we had google ads keys in special config:
-             // return {
-             //   starter: billingCycle === 'monthly' ? specialConfig.googleAdsStarterMonthlyPriceId : ...
-             // }
-             // Fallback to standard for now as they were not in the requirement list explicitly?
-             // Actually, I should check if I missed them. The task said "fetch all stripe data from .env.dev".
-             // The .env.dev does NOT seem to have specific Google Ads price IDs in the section I copied.
-             // Wait, I saw GOOGLE_ADS... env vars but for Stripe Price IDs?
-             // Checking .env.dev again...
-             // It calls: STRIPE_TIKTOK_... and STRIPE_ORGANIZATION_...
-             // It does NOT explicitly show STRIPE_GOOGLE_ADS_... in the file snippet I saw.
-             // So I will only override what I have.
+          return {
+            starter: billingCycle === 'monthly' ? specialConfig.googleAdsStarterMonthlyPriceId : specialConfig.googleAdsStarterAnnualPriceId,
+            pro: billingCycle === 'monthly' ? specialConfig.googleAdsProMonthlyPriceId : specialConfig.googleAdsProAnnualPriceId,
+          };
         }
         return {
           starter: billingCycle === 'monthly' 
