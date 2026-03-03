@@ -290,7 +290,7 @@ export class GoogleAdsService {
       const listResponse = await this.makeApiRequest<{ resourceNames: string[] }>(
         session,
         'GET',
-        '/v17/customers:listAccessibleCustomers',
+        '/customers:listAccessibleCustomers',
       );
 
       if (!listResponse.resourceNames?.length) {
@@ -822,7 +822,8 @@ export class GoogleAdsService {
     endpoint: string,
     body?: any,
   ): Promise<T> {
-    const url = `${GOOGLE_ADS_API_BASE}${endpoint}`;
+    const versionedEndpoint = endpoint.startsWith('/v') ? endpoint : `/${this.apiVersion}${endpoint}`;
+    const url = `${GOOGLE_ADS_API_BASE}${versionedEndpoint}`;
 
     const headers: Record<string, string> = {
       'Authorization': `Bearer ${session.accessToken}`,
