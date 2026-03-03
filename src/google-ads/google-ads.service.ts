@@ -38,6 +38,7 @@ export class GoogleAdsService {
   private readonly clientId: string;
   private readonly clientSecret: string;
   private readonly developerToken: string;
+  private readonly defaultLoginCustomerId: string;
   private readonly redirectUri: string;
   private readonly apiVersion: string;
   private readonly scopes: string[];
@@ -58,8 +59,9 @@ export class GoogleAdsService {
     this.clientId = googleAdsConfig?.clientId || '';
     this.clientSecret = googleAdsConfig?.clientSecret || '';
     this.developerToken = googleAdsConfig?.developerToken || '';
+    this.defaultLoginCustomerId = this.normalizeCustomerId(googleAdsConfig?.loginCustomerId || '');
     this.redirectUri = googleAdsConfig?.redirectUri || 'http://localhost:3001/google-ads/auth/callback';
-    this.apiVersion = googleAdsConfig?.apiVersion || 'v17';
+    this.apiVersion = googleAdsConfig?.apiVersion || 'v19';
     this.scopes = googleAdsConfig?.scopes || [
       'https://www.googleapis.com/auth/adwords',
       'https://www.googleapis.com/auth/userinfo.email',
@@ -108,6 +110,8 @@ export class GoogleAdsService {
    * Check if user can access a specific Google Ads customer account
    */
   async validateCustomerAccess(userId: number, customerId: string): Promise<void> {
+    const normalizedCustomerId = this.normalizeCustomerId(customerId);
+
     // Bypassing for special users
     const session = await this.sessionRepository.findOne({
       where: { userId },
@@ -119,12 +123,16 @@ export class GoogleAdsService {
 
     // Check Platform seats
     const platformSeats = await this.platformSubscriptionsService.getPlatformSeatsByUser(userId, AdPlatform.GOOGLE);
-    const hasPlatformAccess = platformSeats.some(seat => seat.adAccountId === customerId);
+    const hasPlatformAccess = platformSeats.some(
+      (seat) => this.normalizeCustomerId(seat.adAccountId) === normalizedCustomerId,
+    );
     if (hasPlatformAccess) return;
 
     // Check Organization seats
     const orgSeats = await this.subscriptionsService.getOrganizationSeats(userId, 'google');
-    const hasOrgAccess = orgSeats.some(seat => seat.adAccountId === customerId);
+    const hasOrgAccess = orgSeats.some(
+      (seat) => this.normalizeCustomerId(seat.adAccountId) === normalizedCustomerId,
+    );
 
     if (!hasOrgAccess) {
       throw new ForbiddenException(
@@ -138,7 +146,7 @@ export class GoogleAdsService {
    */
   async getPaidCustomerIds(userId: number): Promise<string[]> {
     const seats = await this.platformSubscriptionsService.getPlatformSeatsByUser(userId, AdPlatform.GOOGLE);
-    return seats.map(seat => seat.adAccountId);
+    return seats.map((seat) => this.normalizeCustomerId(seat.adAccountId));
   }
 
   /**
@@ -227,12 +235,16 @@ export class GoogleAdsService {
         session.accessToken = tokenData.access_token;
         session.refreshToken = tokenData.refresh_token || session.refreshToken;
         session.tokenExpiresAt = tokenExpiresAt;
+        if (!session.loginCustomerId && this.defaultLoginCustomerId) {
+          session.loginCustomerId = this.defaultLoginCustomerId;
+        }
       } else {
         session = this.sessionRepository.create({
           userId,
           accessToken: tokenData.access_token,
           refreshToken: tokenData.refresh_token,
           tokenExpiresAt,
+          loginCustomerId: this.defaultLoginCustomerId || undefined,
         });
       }
 
@@ -306,6 +318,23 @@ export class GoogleAdsService {
       return this.sessionRepository.findOne({ where: { userId } });
     }
 
+    if (session) {
+      const normalizedCustomerId = this.normalizeCustomerId(session.customerId);
+      const normalizedLoginCustomerId = this.normalizeCustomerId(
+        session.loginCustomerId || this.defaultLoginCustomerId,
+      );
+
+      const requiresUpdate =
+        (session.customerId || '') !== normalizedCustomerId
+        || (session.loginCustomerId || '') !== normalizedLoginCustomerId;
+
+      if (requiresUpdate) {
+        session.customerId = normalizedCustomerId || undefined;
+        session.loginCustomerId = normalizedLoginCustomerId || undefined;
+        await this.sessionRepository.save(session);
+      }
+    }
+
     return session;
   }
 
@@ -377,7 +406,7 @@ export class GoogleAdsService {
 
     try {
       const customerClient = this.client.Customer({
-        customer_id: customerId.replace(/-/g, ''),
+        customer_id: this.normalizeCustomerId(customerId),
         refresh_token: session.refreshToken,
       });
 
@@ -414,8 +443,16 @@ export class GoogleAdsService {
       throw new UnauthorizedException('No valid Google Ads session');
     }
 
-    session.customerId = customerId;
-    session.customerName = customerName || `Account ${customerId}`;
+    const normalizedCustomerId = this.normalizeCustomerId(customerId);
+    if (!normalizedCustomerId) {
+      throw new BadRequestException('Invalid customer ID');
+    }
+
+    session.customerId = normalizedCustomerId;
+    session.customerName = customerName || `Account ${normalizedCustomerId}`;
+    if (!session.loginCustomerId && this.defaultLoginCustomerId) {
+      session.loginCustomerId = this.defaultLoginCustomerId;
+    }
     await this.sessionRepository.save(session);
 
     return { success: true };
@@ -531,7 +568,7 @@ export class GoogleAdsService {
     `;
 
     const customerClient = this.client.Customer({
-      customer_id: session.customerId.replace(/-/g, ''),
+      customer_id: this.normalizeCustomerId(session.customerId),
       refresh_token: session.refreshToken,
     });
 
@@ -878,8 +915,9 @@ export class GoogleAdsService {
       'Content-Type': 'application/json',
     };
 
-    if (session.loginCustomerId) {
-      headers['login-customer-id'] = session.loginCustomerId.replace(/-/g, '');
+    const effectiveLoginCustomerId = this.getEffectiveLoginCustomerId(session);
+    if (effectiveLoginCustomerId) {
+      headers['login-customer-id'] = effectiveLoginCustomerId;
     }
 
     const response = await fetch(url, {
@@ -912,8 +950,7 @@ export class GoogleAdsService {
     query: string,
     pageToken?: string,
   ): Promise<GoogleAdsApiResponse<any>> {
-    const cleanCustomerId = customerId.replace(/-/g, '');
-    const url = `${GOOGLE_ADS_API_BASE}/v17/customers/${cleanCustomerId}/googleAds:search`;
+    const cleanCustomerId = this.normalizeCustomerId(customerId);
 
     const headers: Record<string, string> = {
       'Authorization': `Bearer ${session.accessToken}`,
@@ -921,8 +958,9 @@ export class GoogleAdsService {
       'Content-Type': 'application/json',
     };
 
-    if (session.loginCustomerId) {
-      headers['login-customer-id'] = session.loginCustomerId.replace(/-/g, '');
+    const effectiveLoginCustomerId = this.getEffectiveLoginCustomerId(session);
+    if (effectiveLoginCustomerId) {
+      headers['login-customer-id'] = effectiveLoginCustomerId;
     }
 
     const body: any = { query };
@@ -930,21 +968,62 @@ export class GoogleAdsService {
       body.pageToken = pageToken;
     }
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-    });
+    const versions = this.getApiVersionsToTry();
+    let lastError: BadRequestException | null = null;
 
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      this.logger.error(`Google Ads Search API error: ${response.status}`, errorData);
-      throw new BadRequestException(
-        errorData.error?.message || 'Google Ads query failed',
-      );
+    for (const version of versions) {
+      const url = `${GOOGLE_ADS_API_BASE}/${version}/customers/${cleanCustomerId}/googleAds:search`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      });
+
+      if (response.ok) {
+        return response.json();
+      }
+
+      const responseText = await response.text().catch(() => '');
+      let errorData: any = {};
+      try {
+        errorData = JSON.parse(responseText);
+      } catch {
+        errorData = { rawText: responseText };
+      }
+
+      const message = errorData.error?.message || `Google Ads query failed (${response.status})`;
+      this.logger.error(`[GOOGLE ADS SEARCH] ${version} failed (${response.status}): ${message}`);
+
+      const isVersionIssue =
+        response.status === 404
+        || response.status === 410
+        || /not found/i.test(responseText)
+        || /deprecated|sunset|unsupported/i.test(message);
+
+      lastError = new BadRequestException(message);
+      if (!isVersionIssue) {
+        throw lastError;
+      }
     }
 
-    return response.json();
+    throw lastError || new BadRequestException('Google Ads query failed');
+  }
+
+  private getApiVersionsToTry(): string[] {
+    const preferred = this.apiVersion || 'v19';
+    const fallbacks = ['v20', 'v19', 'v18', 'v17'];
+    return [preferred, ...fallbacks.filter((version) => version !== preferred)];
+  }
+
+  private normalizeCustomerId(value: string | undefined | null): string {
+    if (!value) return '';
+    return value.toString().replace(/^customers\//i, '').replace(/-/g, '').trim();
+  }
+
+  private getEffectiveLoginCustomerId(session: GoogleAdsSession): string {
+    return this.normalizeCustomerId(
+      session.loginCustomerId || session.managerCustomerId || this.defaultLoginCustomerId,
+    );
   }
 
   // Calculation helpers

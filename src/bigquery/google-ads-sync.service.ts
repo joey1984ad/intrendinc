@@ -19,6 +19,8 @@ export class GoogleAdsSyncService {
   private readonly clientId: string;
   private readonly clientSecret: string;
   private readonly developerToken: string;
+  private readonly apiVersion: string;
+  private readonly defaultLoginCustomerId: string;
   private isSyncing = false;
 
   constructor(
@@ -37,6 +39,8 @@ export class GoogleAdsSyncService {
     this.clientId = googleAdsConfig?.clientId || '';
     this.clientSecret = googleAdsConfig?.clientSecret || '';
     this.developerToken = googleAdsConfig?.developerToken || '';
+    this.apiVersion = googleAdsConfig?.apiVersion || 'v19';
+    this.defaultLoginCustomerId = this.normalizeCustomerId(googleAdsConfig?.loginCustomerId || '');
   }
 
   // ==================== SCHEDULED SYNC ====================
@@ -117,7 +121,17 @@ export class GoogleAdsSyncService {
    */
   async syncAccount(session: GoogleAdsSession): Promise<{ rowsSynced: number }> {
     const startTime = Date.now();
-    const { userId, customerId } = session;
+    const userId = session.userId;
+    const customerId = this.normalizeCustomerId(session.customerId);
+
+    if (!customerId) {
+      throw new Error('No valid customer ID selected');
+    }
+
+    if (session.customerId !== customerId) {
+      session.customerId = customerId;
+      await this.sessionRepository.save(session);
+    }
 
     this.logger.log(`Starting sync for userId=${userId}, customerId=${customerId}`);
 
@@ -468,9 +482,7 @@ export class GoogleAdsSyncService {
     customerId: string,
     query: string,
   ): Promise<{ results?: any[] }> {
-    const cleanCustomerId = customerId.replace(/-/g, '');
-    const apiVersion = this.configService.get('googleAds')?.apiVersion || 'v17';
-    const url = `${GOOGLE_ADS_API_BASE}/${apiVersion}/customers/${cleanCustomerId}/googleAds:search`;
+    const cleanCustomerId = this.normalizeCustomerId(customerId);
 
     const headers: Record<string, string> = {
       'Authorization': `Bearer ${session.accessToken}`,
@@ -478,32 +490,73 @@ export class GoogleAdsSyncService {
       'Content-Type': 'application/json',
     };
 
-    if (session.loginCustomerId) {
-      headers['login-customer-id'] = session.loginCustomerId.replace(/-/g, '');
+    const effectiveLoginCustomerId = this.getEffectiveLoginCustomerId(session);
+    if (effectiveLoginCustomerId) {
+      headers['login-customer-id'] = effectiveLoginCustomerId;
     }
 
-    this.logger.log(`[SYNC API] ${apiVersion} POST ${url}`);
-    this.logger.log(`[SYNC API] customerId=${cleanCustomerId} loginCustomerId=${session.loginCustomerId || 'none'}`);
-    this.logger.log(`[SYNC API] hasAccessToken=${!!session.accessToken} developerToken=${this.developerToken ? 'set' : 'MISSING'}`);
+    this.logger.log(
+      `[SYNC API] customerId=${cleanCustomerId} loginCustomerId=${effectiveLoginCustomerId || 'none'}`,
+    );
+    this.logger.log(
+      `[SYNC API] hasAccessToken=${!!session.accessToken} developerToken=${this.developerToken ? 'set' : 'MISSING'}`,
+    );
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ query }),
-    });
+    const versions = this.getApiVersionsToTry();
+    let lastError: Error | null = null;
 
-    if (!response.ok) {
+    for (const version of versions) {
+      const url = `${GOOGLE_ADS_API_BASE}/${version}/customers/${cleanCustomerId}/googleAds:search`;
+      this.logger.log(`[SYNC API] ${version} POST ${url}`);
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ query }),
+      });
+
+      if (response.ok) {
+        return response.json();
+      }
+
       const rawText = await response.text().catch(() => '');
       let errorData: any = {};
       try { errorData = JSON.parse(rawText); } catch {}
-      this.logger.error(`[SYNC API] FAILED ${response.status} ${response.statusText}`);
+      const message = errorData.error?.message || response.statusText;
+
+      this.logger.error(`[SYNC API] ${version} FAILED ${response.status} ${response.statusText}`);
       this.logger.error(`[SYNC API] Response body: ${rawText.slice(0, 1000)}`);
-      throw new Error(
-        `Google Ads API error ${response.status}: ${errorData.error?.message || response.statusText}`,
-      );
+
+      const isVersionIssue =
+        response.status === 404
+        || response.status === 410
+        || /not found/i.test(rawText)
+        || /deprecated|sunset|unsupported/i.test(message);
+
+      lastError = new Error(`Google Ads API error ${response.status}: ${message}`);
+      if (!isVersionIssue) {
+        throw lastError;
+      }
     }
 
-    return response.json();
+    throw lastError || new Error('Google Ads API query failed');
+  }
+
+  private getApiVersionsToTry(): string[] {
+    const preferred = this.apiVersion || 'v19';
+    const fallbacks = ['v20', 'v19', 'v18', 'v17'];
+    return [preferred, ...fallbacks.filter((version) => version !== preferred)];
+  }
+
+  private normalizeCustomerId(value: string | undefined | null): string {
+    if (!value) return '';
+    return value.toString().replace(/^customers\//i, '').replace(/-/g, '').trim();
+  }
+
+  private getEffectiveLoginCustomerId(session: GoogleAdsSession): string {
+    return this.normalizeCustomerId(
+      session.loginCustomerId || session.managerCustomerId || this.defaultLoginCustomerId,
+    );
   }
 
   // ==================== SYNC STATUS HELPERS ====================
