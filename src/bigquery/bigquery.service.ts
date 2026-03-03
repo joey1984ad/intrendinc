@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { BigQuery, Dataset, Table } from '@google-cloud/bigquery';
+import * as path from 'path';
 
 /**
  * BigQuery table schemas for Google Ads data
@@ -93,9 +94,16 @@ export class BigQueryService implements OnModuleInit {
       return;
     }
 
+    const keyPath = bqConfig?.keyFilePath || './certificates/gcp-service-account.json';
+    const absoluteKeyPath = path.isAbsolute(keyPath)
+      ? keyPath
+      : path.join(process.cwd(), keyPath);
+
+    this.logger.debug(`Using BigQuery key file: ${absoluteKeyPath}`);
+
     this.bigquery = new BigQuery({
       projectId: this.projectId,
-      keyFilename: bqConfig?.keyFilePath,
+      keyFilename: absoluteKeyPath,
     });
     this.dataset = this.bigquery.dataset(this.datasetId);
   }
@@ -107,12 +115,17 @@ export class BigQueryService implements OnModuleInit {
     }
 
     try {
+      this.logger.log(`Initializing BigQuery for project: ${this.projectId}`);
       await this.ensureDatasetExists();
       await this.ensureTablesExist();
       this.initialized = true;
-      this.logger.log(`BigQuery initialized: project=${this.projectId}, dataset=${this.datasetId}`);
+      this.logger.log(`BigQuery initialized successfully: project=${this.projectId}, dataset=${this.datasetId}`);
     } catch (error: any) {
-      this.logger.error(`BigQuery initialization failed: ${error.message}`, error.stack);
+      this.logger.error(`BigQuery initialization failed: ${error.message}`);
+      if (error.stack) {
+        this.logger.debug(`BigQuery Error Stack: ${error.stack}`);
+      }
+      // Keep initialized = false so features can fall back
     }
   }
 
