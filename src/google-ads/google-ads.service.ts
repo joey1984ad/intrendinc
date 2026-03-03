@@ -7,6 +7,7 @@ import { GoogleAdsCampaignData } from './entities/google-ads-campaign-data.entit
 import { PlatformMetrics, PlatformCampaign, PlatformAdGroup, PlatformAd, AdPlatform } from '../common/interfaces/ad-platform.interface';
 import { PlatformSubscriptionsService } from '../subscriptions/platform-subscriptions.service';
 import { BigQueryService } from '../bigquery/bigquery.service';
+import { GoogleAdsApi } from 'google-ads-api';
 
 // Google Ads API base URL
 const GOOGLE_ADS_API_BASE = 'https://googleads.googleapis.com';
@@ -38,6 +39,7 @@ export class GoogleAdsService {
   private readonly redirectUri: string;
   private readonly apiVersion: string;
   private readonly scopes: string[];
+  private readonly client: GoogleAdsApi;
   constructor(
     private readonly configService: ConfigService,
     @InjectRepository(GoogleAdsSession)
@@ -58,6 +60,12 @@ export class GoogleAdsService {
       'https://www.googleapis.com/auth/adwords',
       'https://www.googleapis.com/auth/userinfo.email',
     ];
+
+    this.client = new GoogleAdsApi({
+      client_id: this.clientId,
+      client_secret: this.clientSecret,
+      developer_token: this.developerToken,
+    });
   }
 
   // ==================== SUBSCRIPTION VALIDATION ====================
@@ -281,26 +289,20 @@ export class GoogleAdsService {
    */
   async getAccessibleCustomers(userId: number): Promise<GoogleAdsCustomer[]> {
     const session = await this.getSession(userId);
-    if (!session) {
-      throw new UnauthorizedException('No valid Google Ads session');
+    if (!session || !session.refreshToken) {
+      throw new UnauthorizedException('No valid Google Ads session or refresh token');
     }
 
     try {
-      // First, get list of accessible customer IDs
-      const listResponse = await this.makeApiRequest<{ resourceNames: string[] }>(
-        session,
-        'GET',
-        '/customers:listAccessibleCustomers',
-      );
+      const listResponse = await this.client.listAccessibleCustomers(session.refreshToken);
 
-      if (!listResponse.resourceNames?.length) {
+      if (!listResponse || !listResponse.resource_names || listResponse.resource_names.length === 0) {
         return [];
       }
 
-      // For each customer, get details
       const customers: GoogleAdsCustomer[] = [];
 
-      for (const resourceName of listResponse.resourceNames) {
+      for (const resourceName of listResponse.resource_names) {
         const customerId = resourceName.replace('customers/', '');
         try {
           const customerDetails = await this.getCustomerDetails(session, customerId);
@@ -339,18 +341,23 @@ export class GoogleAdsService {
     `;
 
     try {
-      const response = await this.makeSearchRequest(session, customerId, query);
-      const result = response.results?.[0];
+      const customerClient = this.client.Customer({
+        customer_id: customerId.replace(/-/g, ''),
+        refresh_token: session.refreshToken,
+      });
+
+      const response = await customerClient.query(query);
+      const result = response[0];
       
       if (result?.customer) {
         return {
           resourceName: `customers/${customerId}`,
-          id: result.customer.id,
-          descriptiveName: result.customer.descriptiveName || `Account ${customerId}`,
-          currencyCode: result.customer.currencyCode,
-          timeZone: result.customer.timeZone,
+          id: result.customer.id?.toString() || '',
+          descriptiveName: result.customer.descriptive_name || `Account ${customerId}`,
+          currencyCode: result.customer.currency_code || '',
+          timeZone: result.customer.time_zone || '',
           manager: result.customer.manager || false,
-          testAccount: result.customer.testAccount || false,
+          testAccount: result.customer.test_account || false,
         };
       }
       return null;
@@ -469,7 +476,7 @@ export class GoogleAdsService {
    */
   async getCampaign(userId: number, campaignId: string): Promise<PlatformCampaign | null> {
     const session = await this.getSession(userId);
-    if (!session || !session.customerId) {
+    if (!session || !session.customerId || !session.refreshToken) {
       throw new UnauthorizedException('No valid session or customer selected');
     }
 
@@ -488,25 +495,30 @@ export class GoogleAdsService {
       WHERE campaign.id = ${campaignId}
     `;
 
-    const response = await this.makeSearchRequest(session, session.customerId, query);
-    const result = response.results?.[0];
+    const customerClient = this.client.Customer({
+      customer_id: session.customerId.replace(/-/g, ''),
+      refresh_token: session.refreshToken,
+    });
+
+    const response = await customerClient.query(query);
+    const result = response[0];
 
     if (!result) return null;
 
     return {
-      id: result.campaign.id,
-      name: result.campaign.name,
-      status: result.campaign.status,
-      objective: result.campaign.advertisingChannelType,
-      budget: result.campaignBudget?.amountMicros ? result.campaignBudget.amountMicros / 1000000 : 0,
+      id: result.campaign?.id?.toString() || '',
+      name: result.campaign?.name || '',
+      status: result.campaign?.status?.toString() || '',
+      objective: (result.campaign?.advertising_channel_type as unknown as string) || '',
+      budget: result.campaign_budget?.amount_micros ? result.campaign_budget.amount_micros / 1000000 : 0,
       metrics: {
-        impressions: parseInt(result.metrics?.impressions || '0', 10),
-        clicks: parseInt(result.metrics?.clicks || '0', 10),
-        spend: (result.metrics?.costMicros || 0) / 1000000,
-        conversions: parseFloat(result.metrics?.conversions || '0'),
+        impressions: parseInt(result.metrics?.impressions?.toString() || '0', 10),
+        clicks: parseInt(result.metrics?.clicks?.toString() || '0', 10),
+        spend: (result.metrics?.cost_micros || 0) / 1000000,
+        conversions: parseFloat(result.metrics?.conversions?.toString() || '0'),
         ctr: this.calculateCtr(result.metrics?.clicks, result.metrics?.impressions),
-        cpc: this.calculateCpc(result.metrics?.costMicros, result.metrics?.clicks),
-        cpm: this.calculateCpm(result.metrics?.costMicros, result.metrics?.impressions),
+        cpc: this.calculateCpc(result.metrics?.cost_micros, result.metrics?.clicks),
+        cpm: this.calculateCpm(result.metrics?.cost_micros, result.metrics?.impressions),
       },
     };
   }
