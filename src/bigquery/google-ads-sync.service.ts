@@ -469,7 +469,8 @@ export class GoogleAdsSyncService {
     query: string,
   ): Promise<{ results?: any[] }> {
     const cleanCustomerId = customerId.replace(/-/g, '');
-    const url = `${GOOGLE_ADS_API_BASE}/v18/customers/${cleanCustomerId}/googleAds:search`;
+    const apiVersion = this.configService.get('googleAds')?.apiVersion || 'v17';
+    const url = `${GOOGLE_ADS_API_BASE}/${apiVersion}/customers/${cleanCustomerId}/googleAds:search`;
 
     const headers: Record<string, string> = {
       'Authorization': `Bearer ${session.accessToken}`,
@@ -481,6 +482,10 @@ export class GoogleAdsSyncService {
       headers['login-customer-id'] = session.loginCustomerId.replace(/-/g, '');
     }
 
+    this.logger.log(`[SYNC API] ${apiVersion} POST ${url}`);
+    this.logger.log(`[SYNC API] customerId=${cleanCustomerId} loginCustomerId=${session.loginCustomerId || 'none'}`);
+    this.logger.log(`[SYNC API] hasAccessToken=${!!session.accessToken} developerToken=${this.developerToken ? 'set' : 'MISSING'}`);
+
     const response = await fetch(url, {
       method: 'POST',
       headers,
@@ -488,7 +493,11 @@ export class GoogleAdsSyncService {
     });
 
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
+      const rawText = await response.text().catch(() => '');
+      let errorData: any = {};
+      try { errorData = JSON.parse(rawText); } catch {}
+      this.logger.error(`[SYNC API] FAILED ${response.status} ${response.statusText}`);
+      this.logger.error(`[SYNC API] Response body: ${rawText.slice(0, 1000)}`);
       throw new Error(
         `Google Ads API error ${response.status}: ${errorData.error?.message || response.statusText}`,
       );
