@@ -6,6 +6,8 @@ import { GoogleAdsSession } from './entities/google-ads-session.entity';
 import { GoogleAdsCampaignData } from './entities/google-ads-campaign-data.entity';
 import { PlatformMetrics, PlatformCampaign, PlatformAdGroup, PlatformAd, AdPlatform } from '../common/interfaces/ad-platform.interface';
 import { PlatformSubscriptionsService } from '../subscriptions/platform-subscriptions.service';
+import { SubscriptionsService } from '../subscriptions/subscriptions.service';
+import { stripeSpecialUsersConfig } from '../config/stripe-special-users.config';
 import { BigQueryService } from '../bigquery/bigquery.service';
 import { GoogleAdsApi } from 'google-ads-api';
 
@@ -48,6 +50,8 @@ export class GoogleAdsService {
     private readonly campaignDataRepository: Repository<GoogleAdsCampaignData>,
     @Inject(forwardRef(() => PlatformSubscriptionsService))
     private readonly platformSubscriptionsService: PlatformSubscriptionsService,
+    @Inject(forwardRef(() => SubscriptionsService))
+    private readonly subscriptionsService: SubscriptionsService,
     private readonly bigQueryService: BigQueryService,
   ) {
     const googleAdsConfig = this.configService.get('googleAds');
@@ -75,9 +79,25 @@ export class GoogleAdsService {
    * Uses the organization seats with platform='google'
    */
   async validateSubscription(userId: number): Promise<void> {
-    const seats = await this.platformSubscriptionsService.getPlatformSeatsByUser(userId, AdPlatform.GOOGLE);
+    // Check if user is a special user (bypass subscription check)
+    const session = await this.sessionRepository.findOne({
+      where: { userId },
+      relations: ['user'],
+    });
 
-    if (seats.length === 0) {
+    if (session?.user?.email && stripeSpecialUsersConfig[session.user.email]) {
+      this.logger.log(`Bypassing subscription check for special user: ${session.user.email}`);
+      return;
+    }
+
+    // Try Platform seats first
+    const platformSeats = await this.platformSubscriptionsService.getPlatformSeatsByUser(userId, AdPlatform.GOOGLE);
+    if (platformSeats.length > 0) return;
+
+    // Fallback to Organization seats
+    const orgSeats = await this.subscriptionsService.getOrganizationSeats(userId, 'google');
+
+    if (orgSeats.length === 0) {
       throw new ForbiddenException(
         'No active Google Ads subscriptions. Please subscribe to at least one Google Ads account.',
       );
@@ -88,10 +108,25 @@ export class GoogleAdsService {
    * Check if user can access a specific Google Ads customer account
    */
   async validateCustomerAccess(userId: number, customerId: string): Promise<void> {
-    const seats = await this.platformSubscriptionsService.getPlatformSeatsByUser(userId, AdPlatform.GOOGLE);
-    const hasAccess = seats.some(seat => seat.adAccountId === customerId);
+    // Bypassing for special users
+    const session = await this.sessionRepository.findOne({
+      where: { userId },
+      relations: ['user'],
+    });
+    if (session?.user?.email && stripeSpecialUsersConfig[session.user.email]) {
+      return;
+    }
 
-    if (!hasAccess) {
+    // Check Platform seats
+    const platformSeats = await this.platformSubscriptionsService.getPlatformSeatsByUser(userId, AdPlatform.GOOGLE);
+    const hasPlatformAccess = platformSeats.some(seat => seat.adAccountId === customerId);
+    if (hasPlatformAccess) return;
+
+    // Check Organization seats
+    const orgSeats = await this.subscriptionsService.getOrganizationSeats(userId, 'google');
+    const hasOrgAccess = orgSeats.some(seat => seat.adAccountId === customerId);
+
+    if (!hasOrgAccess) {
       throw new ForbiddenException(
         'This Google Ads customer account is not included in your subscription. Please add it to your plan.',
       );
