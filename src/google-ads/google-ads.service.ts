@@ -970,40 +970,66 @@ export class GoogleAdsService {
 
     const versions = this.getApiVersionsToTry();
     let lastError: BadRequestException | null = null;
+    let sawServerError = false;
 
     for (const version of versions) {
-      const url = `${GOOGLE_ADS_API_BASE}/${version}/customers/${cleanCustomerId}/googleAds:search`;
-      const response = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-      });
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        const url = `${GOOGLE_ADS_API_BASE}/${version}/customers/${cleanCustomerId}/googleAds:search`;
+        const response = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+        });
 
-      if (response.ok) {
-        return response.json();
+        if (response.ok) {
+          return response.json();
+        }
+
+        const responseText = await response.text().catch(() => '');
+        let errorData: any = {};
+        try {
+          errorData = JSON.parse(responseText);
+        } catch {
+          errorData = { rawText: responseText };
+        }
+
+        const message = errorData.error?.message || `Google Ads query failed (${response.status})`;
+        this.logger.error(`[GOOGLE ADS SEARCH] ${version} attempt=${attempt} failed (${response.status}): ${message}`);
+
+        const isVersionIssue =
+          response.status === 404
+          || response.status === 410
+          || /not found/i.test(responseText)
+          || /deprecated|sunset|unsupported/i.test(message);
+        const isRetryable =
+          response.status === 429
+          || response.status === 500
+          || response.status === 503
+          || /internal error encountered/i.test(message)
+          || /temporarily unavailable/i.test(message);
+
+        if (response.status >= 500) {
+          sawServerError = true;
+        }
+
+        lastError = new BadRequestException(message);
+        if (isRetryable && attempt < 3) {
+          await this.sleep(300 * attempt);
+          continue;
+        }
+        if (isVersionIssue) {
+          break;
+        }
+        if (!isRetryable) {
+          throw lastError;
+        }
       }
+    }
 
-      const responseText = await response.text().catch(() => '');
-      let errorData: any = {};
-      try {
-        errorData = JSON.parse(responseText);
-      } catch {
-        errorData = { rawText: responseText };
-      }
-
-      const message = errorData.error?.message || `Google Ads query failed (${response.status})`;
-      this.logger.error(`[GOOGLE ADS SEARCH] ${version} failed (${response.status}): ${message}`);
-
-      const isVersionIssue =
-        response.status === 404
-        || response.status === 410
-        || /not found/i.test(responseText)
-        || /deprecated|sunset|unsupported/i.test(message);
-
-      lastError = new BadRequestException(message);
-      if (!isVersionIssue) {
-        throw lastError;
-      }
+    if (sawServerError && session.refreshToken) {
+      this.logger.warn('[GOOGLE ADS SEARCH] Falling back to google-ads-api client query after REST failures');
+      const rows = await this.executeSearchViaClient(session, cleanCustomerId, query);
+      return { results: rows.map((row) => this.toCamelCaseDeep(row)) };
     }
 
     throw lastError || new BadRequestException('Google Ads query failed');
@@ -1024,6 +1050,39 @@ export class GoogleAdsService {
     return this.normalizeCustomerId(
       session.loginCustomerId || session.managerCustomerId || this.defaultLoginCustomerId,
     );
+  }
+
+  private async executeSearchViaClient(
+    session: GoogleAdsSession,
+    customerId: string,
+    query: string,
+  ): Promise<any[]> {
+    const loginCustomerId = this.getEffectiveLoginCustomerId(session);
+    const customerClient = this.client.Customer({
+      customer_id: customerId,
+      refresh_token: session.refreshToken,
+      ...(loginCustomerId ? { login_customer_id: loginCustomerId } : {}),
+    });
+    return customerClient.query(query);
+  }
+
+  private toCamelCaseDeep(value: any): any {
+    if (Array.isArray(value)) {
+      return value.map((item) => this.toCamelCaseDeep(item));
+    }
+    if (value && typeof value === 'object') {
+      const out: Record<string, any> = {};
+      for (const [key, inner] of Object.entries(value)) {
+        const camelKey = key.replace(/_([a-z])/g, (_, char: string) => char.toUpperCase());
+        out[camelKey] = this.toCamelCaseDeep(inner);
+      }
+      return out;
+    }
+    return value;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   // Calculation helpers

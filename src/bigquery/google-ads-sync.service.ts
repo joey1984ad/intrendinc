@@ -6,6 +6,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { BigQueryService } from './bigquery.service';
 import { BigQuerySyncStatus } from './entities/sync-status.entity';
 import { GoogleAdsSession } from '../google-ads/entities/google-ads-session.entity';
+import { GoogleAdsApi } from 'google-ads-api';
 
 // Google Ads API constants (same as in google-ads.service.ts)
 const GOOGLE_ADS_API_BASE = 'https://googleads.googleapis.com';
@@ -21,6 +22,7 @@ export class GoogleAdsSyncService {
   private readonly developerToken: string;
   private readonly apiVersion: string;
   private readonly defaultLoginCustomerId: string;
+  private readonly client: GoogleAdsApi;
   private isSyncing = false;
 
   constructor(
@@ -41,6 +43,11 @@ export class GoogleAdsSyncService {
     this.developerToken = googleAdsConfig?.developerToken || '';
     this.apiVersion = googleAdsConfig?.apiVersion || 'v19';
     this.defaultLoginCustomerId = this.normalizeCustomerId(googleAdsConfig?.loginCustomerId || '');
+    this.client = new GoogleAdsApi({
+      client_id: this.clientId,
+      client_secret: this.clientSecret,
+      developer_token: this.developerToken,
+    });
   }
 
   // ==================== SCHEDULED SYNC ====================
@@ -504,42 +511,90 @@ export class GoogleAdsSyncService {
 
     const versions = this.getApiVersionsToTry();
     let lastError: Error | null = null;
+    let sawServerError = false;
 
     for (const version of versions) {
-      const url = `${GOOGLE_ADS_API_BASE}/${version}/customers/${cleanCustomerId}/googleAds:search`;
-      this.logger.log(`[SYNC API] ${version} POST ${url}`);
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        const url = `${GOOGLE_ADS_API_BASE}/${version}/customers/${cleanCustomerId}/googleAds:search`;
+        this.logger.log(`[SYNC API] ${version} POST ${url} attempt=${attempt}`);
 
-      const response = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ query }),
-      });
+        const response = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ query }),
+        });
 
-      if (response.ok) {
-        return response.json();
-      }
+        if (response.ok) {
+          return response.json();
+        }
 
-      const rawText = await response.text().catch(() => '');
-      let errorData: any = {};
-      try { errorData = JSON.parse(rawText); } catch {}
-      const message = errorData.error?.message || response.statusText;
+        const rawText = await response.text().catch(() => '');
+        let errorData: any = {};
+        try { errorData = JSON.parse(rawText); } catch {}
+        const message = errorData.error?.message || response.statusText;
 
-      this.logger.error(`[SYNC API] ${version} FAILED ${response.status} ${response.statusText}`);
-      this.logger.error(`[SYNC API] Response body: ${rawText.slice(0, 1000)}`);
+        this.logger.error(`[SYNC API] ${version} FAILED ${response.status} ${response.statusText}`);
+        this.logger.error(`[SYNC API] Response body: ${rawText.slice(0, 1000)}`);
 
-      const isVersionIssue =
-        response.status === 404
-        || response.status === 410
-        || /not found/i.test(rawText)
-        || /deprecated|sunset|unsupported/i.test(message);
+        const isVersionIssue =
+          response.status === 404
+          || response.status === 410
+          || /not found/i.test(rawText)
+          || /deprecated|sunset|unsupported/i.test(message);
+        const isRetryable =
+          response.status === 429
+          || response.status === 500
+          || response.status === 503
+          || /internal error encountered/i.test(message)
+          || /temporarily unavailable/i.test(message);
 
-      lastError = new Error(`Google Ads API error ${response.status}: ${message}`);
-      if (!isVersionIssue) {
-        throw lastError;
+        if (response.status >= 500) {
+          sawServerError = true;
+        }
+
+        lastError = new Error(`Google Ads API error ${response.status}: ${message}`);
+
+        if (isRetryable && attempt < 3) {
+          await this.sleep(300 * attempt);
+          continue;
+        }
+
+        if (isVersionIssue) {
+          break;
+        }
+
+        if (!isRetryable) {
+          throw lastError;
+        }
       }
     }
 
+    if (sawServerError) {
+      this.logger.warn('[SYNC API] Falling back to google-ads-api client query after REST failures');
+      return this.makeSearchRequestViaClient(session, cleanCustomerId, query, effectiveLoginCustomerId);
+    }
+
     throw lastError || new Error('Google Ads API query failed');
+  }
+
+  private async makeSearchRequestViaClient(
+    session: GoogleAdsSession,
+    customerId: string,
+    query: string,
+    loginCustomerId: string,
+  ): Promise<{ results?: any[] }> {
+    if (!session.refreshToken) {
+      throw new Error('No refresh token available for google-ads-api fallback');
+    }
+
+    const customerClient = this.client.Customer({
+      customer_id: customerId,
+      refresh_token: session.refreshToken,
+      ...(loginCustomerId ? { login_customer_id: loginCustomerId } : {}),
+    });
+
+    const rows = await customerClient.query(query);
+    return { results: rows.map((row) => this.toCamelCaseDeep(row)) };
   }
 
   private getApiVersionsToTry(): string[] {
@@ -557,6 +612,25 @@ export class GoogleAdsSyncService {
     return this.normalizeCustomerId(
       session.loginCustomerId || session.managerCustomerId || this.defaultLoginCustomerId,
     );
+  }
+
+  private toCamelCaseDeep(value: any): any {
+    if (Array.isArray(value)) {
+      return value.map((item) => this.toCamelCaseDeep(item));
+    }
+    if (value && typeof value === 'object') {
+      const out: Record<string, any> = {};
+      for (const [key, inner] of Object.entries(value)) {
+        const camelKey = key.replace(/_([a-z])/g, (_, char: string) => char.toUpperCase());
+        out[camelKey] = this.toCamelCaseDeep(inner);
+      }
+      return out;
+    }
+    return value;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   // ==================== SYNC STATUS HELPERS ====================
