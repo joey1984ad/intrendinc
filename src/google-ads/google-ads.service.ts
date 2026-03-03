@@ -61,7 +61,7 @@ export class GoogleAdsService {
     this.developerToken = googleAdsConfig?.developerToken || '';
     this.defaultLoginCustomerId = this.normalizeCustomerId(googleAdsConfig?.loginCustomerId || '');
     this.redirectUri = googleAdsConfig?.redirectUri || 'http://localhost:3001/google-ads/auth/callback';
-    this.apiVersion = googleAdsConfig?.apiVersion || 'v19';
+    this.apiVersion = googleAdsConfig?.apiVersion || 'v20';
     this.scopes = googleAdsConfig?.scopes || [
       'https://www.googleapis.com/auth/adwords',
       'https://www.googleapis.com/auth/userinfo.email',
@@ -1012,6 +1012,21 @@ export class GoogleAdsService {
         const message = errorData.error?.message || `Google Ads query failed (${response.status})`;
         this.logger.error(`[GOOGLE ADS SEARCH] ${version} attempt=${attempt} failed (${response.status}): ${message}`);
 
+        if (response.status === 401 && session.refreshToken && attempt < 3) {
+          this.logger.warn('[GOOGLE ADS SEARCH] Received 401, refreshing OAuth token and retrying');
+          session.tokenExpiresAt = new Date(0);
+          const refreshed = await this.refreshToken(session.userId);
+          if (refreshed.success) {
+            const updatedSession = await this.sessionRepository.findOne({ where: { userId: session.userId } });
+            if (updatedSession?.accessToken) {
+              session.accessToken = updatedSession.accessToken;
+              headers.Authorization = `Bearer ${updatedSession.accessToken}`;
+            }
+            await this.sleep(300 * attempt);
+            continue;
+          }
+        }
+
         const isVersionIssue =
           response.status === 404
           || response.status === 410
@@ -1052,9 +1067,9 @@ export class GoogleAdsService {
   }
 
   private getApiVersionsToTry(): string[] {
-    const preferred = this.apiVersion || 'v19';
-    const fallbacks = ['v20', 'v19', 'v18', 'v17'];
-    return [preferred, ...fallbacks.filter((version) => version !== preferred)];
+    const preferred = this.apiVersion || 'v20';
+    const ordered = ['v20', preferred, 'v19', 'v18', 'v17'];
+    return ordered.filter((version, index) => ordered.indexOf(version) === index);
   }
 
   private normalizeCustomerId(value: string | undefined | null): string {

@@ -10,7 +10,7 @@ export default registerAs('googleAds', () => ({
   redirectUri: process.env.GOOGLE_ADS_REDIRECT_URI || 'http://localhost:3001/google-ads/auth/callback',
   
   // API configuration
-  apiVersion: process.env.GOOGLE_ADS_API_VERSION || 'v19', // Google Ads API version
+  apiVersion: process.env.GOOGLE_ADS_API_VERSION || 'v20', // Google Ads API version
   
   // Login customer ID (for MCC accounts)
   loginCustomerId: process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID || '',

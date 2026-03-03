@@ -41,7 +41,7 @@ export class GoogleAdsSyncService {
     this.clientId = googleAdsConfig?.clientId || '';
     this.clientSecret = googleAdsConfig?.clientSecret || '';
     this.developerToken = googleAdsConfig?.developerToken || '';
-    this.apiVersion = googleAdsConfig?.apiVersion || 'v19';
+    this.apiVersion = googleAdsConfig?.apiVersion || 'v20';
     this.defaultLoginCustomerId = this.normalizeCustomerId(googleAdsConfig?.loginCustomerId || '');
     this.client = new GoogleAdsApi({
       client_id: this.clientId,
@@ -604,6 +604,15 @@ export class GoogleAdsSyncService {
         this.logger.error(`[SYNC API] ${version} FAILED ${response.status} ${response.statusText}`);
         this.logger.error(`[SYNC API] Response body: ${rawText.slice(0, 1000)}`);
 
+        if (response.status === 401 && session.refreshToken && attempt < 3) {
+          this.logger.warn('[SYNC API] Received 401, refreshing OAuth token and retrying');
+          session.tokenExpiresAt = new Date(0);
+          const refreshed = await this.ensureFreshToken(session);
+          headers.Authorization = `Bearer ${refreshed.accessToken}`;
+          await this.sleep(300 * attempt);
+          continue;
+        }
+
         const isVersionIssue =
           response.status === 404
           || response.status === 410
@@ -743,9 +752,9 @@ export class GoogleAdsSyncService {
   }
 
   private getApiVersionsToTry(): string[] {
-    const preferred = this.apiVersion || 'v19';
-    const fallbacks = ['v20', 'v19', 'v18', 'v17'];
-    return [preferred, ...fallbacks.filter((version) => version !== preferred)];
+    const preferred = this.apiVersion || 'v20';
+    const ordered = ['v20', preferred, 'v19', 'v18', 'v17'];
+    return ordered.filter((version, index) => ordered.indexOf(version) === index);
   }
 
   private normalizeCustomerId(value: string | undefined | null): string {
