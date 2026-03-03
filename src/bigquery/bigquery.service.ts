@@ -89,8 +89,12 @@ export class BigQueryService implements OnModuleInit {
     this.datasetId = bqConfig?.dataset || 'google_ads_data';
     this.location = bqConfig?.location || 'US';
 
+    this.logger.log(`[BQ CONSTRUCTOR] projectId=${this.projectId} datasetId=${this.datasetId} location=${this.location}`);
+    this.logger.log(`[BQ CONSTRUCTOR] Raw bqConfig: ${JSON.stringify(bqConfig)}`);
+    this.logger.log(`[BQ CONSTRUCTOR] process.cwd()=${process.cwd()}`);
+
     if (!this.projectId) {
-      this.logger.warn('GCP_PROJECT_ID not set — BigQuery features will be disabled');
+      this.logger.error('[BQ CONSTRUCTOR] GCP_PROJECT_ID is empty — BigQuery will be disabled. Check that GCP_PROJECT_ID is set in .env');
       return;
     }
 
@@ -99,33 +103,51 @@ export class BigQueryService implements OnModuleInit {
       ? keyPath
       : path.join(process.cwd(), keyPath);
 
-    this.logger.debug(`Using BigQuery key file: ${absoluteKeyPath}`);
+    this.logger.log(`[BQ CONSTRUCTOR] keyPath (raw)=${keyPath}`);
+    this.logger.log(`[BQ CONSTRUCTOR] absoluteKeyPath=${absoluteKeyPath}`);
+
+    // Check file exists
+    const fs = require('fs');
+    const fileExists = fs.existsSync(absoluteKeyPath);
+    this.logger.log(`[BQ CONSTRUCTOR] key file exists=${fileExists}`);
+    if (fileExists) {
+      const stat = fs.statSync(absoluteKeyPath);
+      this.logger.log(`[BQ CONSTRUCTOR] key file size=${stat.size} bytes`);
+    } else {
+      this.logger.error(`[BQ CONSTRUCTOR] KEY FILE NOT FOUND at ${absoluteKeyPath}`);
+    }
 
     this.bigquery = new BigQuery({
       projectId: this.projectId,
       keyFilename: absoluteKeyPath,
     });
     this.dataset = this.bigquery.dataset(this.datasetId);
+    this.logger.log(`[BQ CONSTRUCTOR] BigQuery client created`);
   }
 
   async onModuleInit(): Promise<void> {
+    this.logger.log(`[BQ INIT] onModuleInit called. projectId=${this.projectId}`);
+
     if (!this.projectId) {
-      this.logger.warn('BigQuery initialization skipped — no project ID configured');
+      this.logger.error('[BQ INIT] Skipping — no project ID. Make sure GCP_PROJECT_ID is in .env');
       return;
     }
 
     try {
-      this.logger.log(`Initializing BigQuery for project: ${this.projectId}`);
+      this.logger.log(`[BQ INIT] Checking dataset exists: ${this.datasetId}`);
       await this.ensureDatasetExists();
+      this.logger.log(`[BQ INIT] Dataset OK. Checking tables...`);
       await this.ensureTablesExist();
       this.initialized = true;
-      this.logger.log(`BigQuery initialized successfully: project=${this.projectId}, dataset=${this.datasetId}`);
+      this.logger.log(`[BQ INIT] SUCCESS — project=${this.projectId}, dataset=${this.datasetId}`);
     } catch (error: any) {
-      this.logger.error(`BigQuery initialization failed: ${error.message}`);
+      this.logger.error(`[BQ INIT] FAILED: ${error.message}`);
+      this.logger.error(`[BQ INIT] Error code: ${error.code}`);
+      this.logger.error(`[BQ INIT] Error status: ${error.status}`);
+      this.logger.error(`[BQ INIT] Full error: ${JSON.stringify(error, Object.getOwnPropertyNames(error))}`);
       if (error.stack) {
-        this.logger.debug(`BigQuery Error Stack: ${error.stack}`);
+        this.logger.error(`[BQ INIT] Stack: ${error.stack}`);
       }
-      // Keep initialized = false so features can fall back
     }
   }
 
@@ -201,19 +223,35 @@ export class BigQueryService implements OnModuleInit {
       throw new Error('BigQuery is not initialized');
     }
 
-    if (rows.length === 0) return;
+    if (rows.length === 0) {
+      this.logger.log(`[BQ INSERT] table=${tableName} — 0 rows, skipping`);
+      return;
+    }
 
+    this.logger.log(`[BQ INSERT] table=${tableName} rowCount=${rows.length}`);
     const table = this.dataset.table(tableName);
 
-    // BigQuery streaming insert has a 10,000 row per request limit
     const BATCH_SIZE = 5000;
     for (let i = 0; i < rows.length; i += BATCH_SIZE) {
       const batch = rows.slice(i, i + BATCH_SIZE);
-      await table.insert(batch, {
-        skipInvalidRows: false,
-        ignoreUnknownValues: false,
-      });
+      this.logger.log(`[BQ INSERT] Inserting batch ${Math.floor(i/BATCH_SIZE)+1} (rows ${i}–${i+batch.length})`);
+      try {
+        await table.insert(batch, {
+          skipInvalidRows: false,
+          ignoreUnknownValues: false,
+        });
+        this.logger.log(`[BQ INSERT] Batch OK`);
+      } catch (error: any) {
+        this.logger.error(`[BQ INSERT] FAILED on table=${tableName} batch at row ${i}: ${error.message}`);
+        this.logger.error(`[BQ INSERT] code=${error.code} status=${error.status}`);
+        if (error.errors) {
+          this.logger.error(`[BQ INSERT] row errors: ${JSON.stringify(error.errors?.slice(0, 5))}`);
+        }
+        this.logger.error(`[BQ INSERT] full=${JSON.stringify(error, Object.getOwnPropertyNames(error))}`);
+        throw error;
+      }
     }
+    this.logger.log(`[BQ INSERT] table=${tableName} all batches done`);
   }
 
   /**
@@ -235,19 +273,32 @@ export class BigQueryService implements OnModuleInit {
         AND date BETWEEN @startDate AND @endDate
     `;
 
-    const [job] = await this.bigquery.createQueryJob({
-      query: sql,
-      location: this.location,
-      params: {
-        userId: conditions.userId,
-        customerId: conditions.customerId,
-        startDate: conditions.startDate,
-        endDate: conditions.endDate,
-      },
-    });
+    this.logger.log(`[BQ DELETE] table=${tableName} userId=${conditions.userId} customerId=${conditions.customerId} range=${conditions.startDate}→${conditions.endDate}`);
+    this.logger.log(`[BQ DELETE] SQL: ${sql.trim()}`);
 
-    const [result] = await job.getQueryResults();
-    return (job.metadata?.statistics?.query?.numDmlAffectedRows as number) || 0;
+    try {
+      const [job] = await this.bigquery.createQueryJob({
+        query: sql,
+        location: this.location,
+        params: {
+          userId: conditions.userId,
+          customerId: conditions.customerId,
+          startDate: conditions.startDate,
+          endDate: conditions.endDate,
+        },
+      });
+      this.logger.log(`[BQ DELETE] Job created: ${job.id}`);
+
+      const [result] = await job.getQueryResults();
+      const affected = (job.metadata?.statistics?.query?.numDmlAffectedRows as number) || 0;
+      this.logger.log(`[BQ DELETE] Done. rows affected=${affected}`);
+      return affected;
+    } catch (error: any) {
+      this.logger.error(`[BQ DELETE] FAILED on table=${tableName}: ${error.message}`);
+      this.logger.error(`[BQ DELETE] code=${error.code} status=${error.status}`);
+      this.logger.error(`[BQ DELETE] full=${JSON.stringify(error, Object.getOwnPropertyNames(error))}`);
+      throw error;
+    }
   }
 
   /**
