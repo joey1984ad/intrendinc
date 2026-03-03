@@ -53,7 +53,7 @@ export class GoogleAdsService {
     this.clientSecret = googleAdsConfig?.clientSecret || '';
     this.developerToken = googleAdsConfig?.developerToken || '';
     this.redirectUri = googleAdsConfig?.redirectUri || 'http://localhost:3001/google-ads/auth/callback';
-    this.apiVersion = googleAdsConfig?.apiVersion || 'v18';
+    this.apiVersion = googleAdsConfig?.apiVersion || 'v17';
     this.scopes = googleAdsConfig?.scopes || [
       'https://www.googleapis.com/auth/adwords',
       'https://www.googleapis.com/auth/userinfo.email',
@@ -290,7 +290,7 @@ export class GoogleAdsService {
       const listResponse = await this.makeApiRequest<{ resourceNames: string[] }>(
         session,
         'GET',
-        '/v18/customers:listAccessibleCustomers',
+        '/v17/customers:listAccessibleCustomers',
       );
 
       if (!listResponse.resourceNames?.length) {
@@ -865,7 +865,7 @@ export class GoogleAdsService {
     pageToken?: string,
   ): Promise<GoogleAdsApiResponse<any>> {
     const cleanCustomerId = customerId.replace(/-/g, '');
-    const url = `${GOOGLE_ADS_API_BASE}/v18/customers/${cleanCustomerId}/googleAds:search`;
+    const url = `${GOOGLE_ADS_API_BASE}/v17/customers/${cleanCustomerId}/googleAds:search`;
 
     const headers: Record<string, string> = {
       'Authorization': `Bearer ${session.accessToken}`,
