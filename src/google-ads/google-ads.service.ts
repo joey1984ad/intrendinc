@@ -841,9 +841,15 @@ export class GoogleAdsService {
     });
 
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
+      const responseText = await response.text().catch(() => 'Could not read response text');
+      let errorData: any = {};
+      try {
+        errorData = JSON.parse(responseText);
+      } catch (e) {
+        errorData = { rawText: responseText };
+      }
       this.logger.error(`Google Ads API error: ${response.status}`, errorData);
-      throw new BadRequestException(errorData.error?.message || 'Google Ads API request failed');
+      throw new BadRequestException(errorData.error?.message || `Google Ads API request failed: ${response.status} ${response.statusText}`);
     }
 
     return response.json();
