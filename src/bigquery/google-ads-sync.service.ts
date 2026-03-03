@@ -150,6 +150,7 @@ export class GoogleAdsSyncService {
 
     // Ensure token is fresh
     const freshSession = await this.ensureFreshToken(session);
+    const syncTargets = await this.resolveSyncCustomerTargets(freshSession, customerId);
 
     // Calculate date range
     const endDate = new Date();
@@ -165,42 +166,80 @@ export class GoogleAdsSyncService {
     for (const table of tables) {
       await this.bigQueryService.deleteRows(table, {
         userId,
-        customerId,
+        customerId: syncTargets.storageCustomerId,
         startDate: since,
         endDate: until,
       });
     }
 
-    // 1. Sync daily account metrics
-    const dailyMetricsRows = await this.fetchDailyAccountMetrics(freshSession, since, until);
-    if (dailyMetricsRows.length > 0) {
-      await this.bigQueryService.insertRows('daily_account_metrics', dailyMetricsRows);
-      totalRows += dailyMetricsRows.length;
-      this.logger.debug(`Inserted ${dailyMetricsRows.length} daily_account_metrics rows`);
-    }
+    for (const queryCustomerId of syncTargets.queryCustomerIds) {
+      this.logger.log(
+        `Syncing source customer ${queryCustomerId} into storage customer ${syncTargets.storageCustomerId}`,
+      );
 
-    // 2. Sync campaigns by date
-    const campaignRows = await this.fetchCampaignsByDate(freshSession, since, until);
-    if (campaignRows.length > 0) {
-      await this.bigQueryService.insertRows('campaigns', campaignRows);
-      totalRows += campaignRows.length;
-      this.logger.debug(`Inserted ${campaignRows.length} campaigns rows`);
-    }
+      // 1. Sync daily account metrics
+      const dailyMetricsRows = await this.fetchDailyAccountMetrics(
+        freshSession,
+        queryCustomerId,
+        syncTargets.storageCustomerId,
+        since,
+        until,
+        syncTargets.scopeResourceIds,
+        syncTargets.loginCustomerIdOverride,
+      );
+      if (dailyMetricsRows.length > 0) {
+        await this.bigQueryService.insertRows('daily_account_metrics', dailyMetricsRows);
+        totalRows += dailyMetricsRows.length;
+        this.logger.debug(`Inserted ${dailyMetricsRows.length} daily_account_metrics rows`);
+      }
 
-    // 3. Sync ad groups by date
-    const adGroupRows = await this.fetchAdGroupsByDate(freshSession, since, until);
-    if (adGroupRows.length > 0) {
-      await this.bigQueryService.insertRows('ad_groups', adGroupRows);
-      totalRows += adGroupRows.length;
-      this.logger.debug(`Inserted ${adGroupRows.length} ad_groups rows`);
-    }
+      // 2. Sync campaigns by date
+      const campaignRows = await this.fetchCampaignsByDate(
+        freshSession,
+        queryCustomerId,
+        syncTargets.storageCustomerId,
+        since,
+        until,
+        syncTargets.scopeResourceIds,
+        syncTargets.loginCustomerIdOverride,
+      );
+      if (campaignRows.length > 0) {
+        await this.bigQueryService.insertRows('campaigns', campaignRows);
+        totalRows += campaignRows.length;
+        this.logger.debug(`Inserted ${campaignRows.length} campaigns rows`);
+      }
 
-    // 4. Sync ads by date
-    const adRows = await this.fetchAdsByDate(freshSession, since, until);
-    if (adRows.length > 0) {
-      await this.bigQueryService.insertRows('ads', adRows);
-      totalRows += adRows.length;
-      this.logger.debug(`Inserted ${adRows.length} ads rows`);
+      // 3. Sync ad groups by date
+      const adGroupRows = await this.fetchAdGroupsByDate(
+        freshSession,
+        queryCustomerId,
+        syncTargets.storageCustomerId,
+        since,
+        until,
+        syncTargets.scopeResourceIds,
+        syncTargets.loginCustomerIdOverride,
+      );
+      if (adGroupRows.length > 0) {
+        await this.bigQueryService.insertRows('ad_groups', adGroupRows);
+        totalRows += adGroupRows.length;
+        this.logger.debug(`Inserted ${adGroupRows.length} ad_groups rows`);
+      }
+
+      // 4. Sync ads by date
+      const adRows = await this.fetchAdsByDate(
+        freshSession,
+        queryCustomerId,
+        syncTargets.storageCustomerId,
+        since,
+        until,
+        syncTargets.scopeResourceIds,
+        syncTargets.loginCustomerIdOverride,
+      );
+      if (adRows.length > 0) {
+        await this.bigQueryService.insertRows('ads', adRows);
+        totalRows += adRows.length;
+        this.logger.debug(`Inserted ${adRows.length} ads rows`);
+      }
     }
 
     const durationMs = Date.now() - startTime;
@@ -254,8 +293,12 @@ export class GoogleAdsSyncService {
    */
   private async fetchDailyAccountMetrics(
     session: GoogleAdsSession,
+    queryCustomerId: string,
+    storageCustomerId: string,
     since: string,
     until: string,
+    _scopeResourceIds: boolean,
+    loginCustomerIdOverride: string,
   ): Promise<Record<string, any>[]> {
     const query = `
       SELECT 
@@ -270,12 +313,12 @@ export class GoogleAdsSyncService {
       ORDER BY segments.date
     `;
 
-    const response = await this.makeSearchRequest(session, session.customerId, query);
+    const response = await this.makeSearchRequest(session, queryCustomerId, query, loginCustomerIdOverride);
     const now = new Date().toISOString();
 
     return (response.results || []).map((result: any) => ({
       user_id: session.userId,
-      customer_id: session.customerId,
+      customer_id: storageCustomerId,
       date: result.segments?.date,
       impressions: parseInt(result.metrics?.impressions || '0', 10),
       clicks: parseInt(result.metrics?.clicks || '0', 10),
@@ -291,8 +334,12 @@ export class GoogleAdsSyncService {
    */
   private async fetchCampaignsByDate(
     session: GoogleAdsSession,
+    queryCustomerId: string,
+    storageCustomerId: string,
     since: string,
     until: string,
+    scopeResourceIds: boolean,
+    loginCustomerIdOverride: string,
   ): Promise<Record<string, any>[]> {
     const query = `
       SELECT 
@@ -316,14 +363,14 @@ export class GoogleAdsSyncService {
       ORDER BY segments.date, campaign.name
     `;
 
-    const response = await this.makeSearchRequest(session, session.customerId, query);
+    const response = await this.makeSearchRequest(session, queryCustomerId, query, loginCustomerIdOverride);
     const now = new Date().toISOString();
 
     return (response.results || []).map((result: any) => ({
       user_id: session.userId,
-      customer_id: session.customerId,
+      customer_id: storageCustomerId,
       date: result.segments?.date,
-      campaign_id: result.campaign?.id,
+      campaign_id: this.scopeResourceId(scopeResourceIds ? queryCustomerId : '', result.campaign?.id),
       name: result.campaign?.name,
       status: result.campaign?.status,
       channel_type: result.campaign?.advertisingChannelType,
@@ -346,8 +393,12 @@ export class GoogleAdsSyncService {
    */
   private async fetchAdGroupsByDate(
     session: GoogleAdsSession,
+    queryCustomerId: string,
+    storageCustomerId: string,
     since: string,
     until: string,
+    scopeResourceIds: boolean,
+    loginCustomerIdOverride: string,
   ): Promise<Record<string, any>[]> {
     const query = `
       SELECT 
@@ -367,15 +418,15 @@ export class GoogleAdsSyncService {
       ORDER BY segments.date, ad_group.name
     `;
 
-    const response = await this.makeSearchRequest(session, session.customerId, query);
+    const response = await this.makeSearchRequest(session, queryCustomerId, query, loginCustomerIdOverride);
     const now = new Date().toISOString();
 
     return (response.results || []).map((result: any) => ({
       user_id: session.userId,
-      customer_id: session.customerId,
+      customer_id: storageCustomerId,
       date: result.segments?.date,
-      campaign_id: result.campaign?.id,
-      ad_group_id: result.adGroup?.id,
+      campaign_id: this.scopeResourceId(scopeResourceIds ? queryCustomerId : '', result.campaign?.id),
+      ad_group_id: this.scopeResourceId(scopeResourceIds ? queryCustomerId : '', result.adGroup?.id),
       name: result.adGroup?.name,
       status: result.adGroup?.status,
       type: result.adGroup?.type,
@@ -393,8 +444,12 @@ export class GoogleAdsSyncService {
    */
   private async fetchAdsByDate(
     session: GoogleAdsSession,
+    queryCustomerId: string,
+    storageCustomerId: string,
     since: string,
     until: string,
+    scopeResourceIds: boolean,
+    loginCustomerIdOverride: string,
   ): Promise<Record<string, any>[]> {
     const query = `
       SELECT 
@@ -415,16 +470,16 @@ export class GoogleAdsSyncService {
       ORDER BY segments.date, ad_group_ad.ad.name
     `;
 
-    const response = await this.makeSearchRequest(session, session.customerId, query);
+    const response = await this.makeSearchRequest(session, queryCustomerId, query, loginCustomerIdOverride);
     const now = new Date().toISOString();
 
     return (response.results || []).map((result: any) => ({
       user_id: session.userId,
-      customer_id: session.customerId,
+      customer_id: storageCustomerId,
       date: result.segments?.date,
-      campaign_id: result.campaign?.id,
-      ad_group_id: result.adGroup?.id,
-      ad_id: result.adGroupAd?.ad?.id,
+      campaign_id: this.scopeResourceId(scopeResourceIds ? queryCustomerId : '', result.campaign?.id),
+      ad_group_id: this.scopeResourceId(scopeResourceIds ? queryCustomerId : '', result.adGroup?.id),
+      ad_id: this.scopeResourceId(scopeResourceIds ? queryCustomerId : '', result.adGroupAd?.ad?.id),
       name: result.adGroupAd?.ad?.name || `Ad ${result.adGroupAd?.ad?.id}`,
       type: result.adGroupAd?.ad?.type,
       status: result.adGroupAd?.status,
@@ -488,6 +543,7 @@ export class GoogleAdsSyncService {
     session: GoogleAdsSession,
     customerId: string,
     query: string,
+    loginCustomerIdOverride?: string,
   ): Promise<{ results?: any[] }> {
     const cleanCustomerId = this.normalizeCustomerId(customerId);
 
@@ -497,7 +553,9 @@ export class GoogleAdsSyncService {
       'Content-Type': 'application/json',
     };
 
-    const effectiveLoginCustomerId = this.getEffectiveLoginCustomerId(session);
+    const effectiveLoginCustomerId = this.normalizeCustomerId(
+      loginCustomerIdOverride || this.getEffectiveLoginCustomerId(session),
+    );
     if (effectiveLoginCustomerId) {
       headers['login-customer-id'] = effectiveLoginCustomerId;
     }
@@ -532,6 +590,16 @@ export class GoogleAdsSyncService {
         let errorData: any = {};
         try { errorData = JSON.parse(rawText); } catch {}
         const message = errorData.error?.message || response.statusText;
+        const detailsErrors = (errorData.error?.details || [])
+          .flatMap((detail: any) => detail?.errors || [])
+          .map((inner: any) => ({
+            code: Object.keys(inner?.errorCode || {})[0] || 'UNKNOWN',
+            value: Object.values(inner?.errorCode || {})[0] || '',
+            message: inner?.message || '',
+          }));
+        const hasManagerMetricsError = detailsErrors.some(
+          (inner: any) => inner.value === 'REQUESTED_METRICS_FOR_MANAGER',
+        );
 
         this.logger.error(`[SYNC API] ${version} FAILED ${response.status} ${response.statusText}`);
         this.logger.error(`[SYNC API] Response body: ${rawText.slice(0, 1000)}`);
@@ -553,6 +621,13 @@ export class GoogleAdsSyncService {
         }
 
         lastError = new Error(`Google Ads API error ${response.status}: ${message}`);
+
+        if (hasManagerMetricsError) {
+          throw new Error(
+            `Selected account ${cleanCustomerId} is a manager (MCC) account. ` +
+            'Google Ads does not return metrics for manager accounts. Please select a client account.',
+          );
+        }
 
         if (isRetryable && attempt < 3) {
           await this.sleep(300 * attempt);
@@ -597,6 +672,76 @@ export class GoogleAdsSyncService {
     return { results: rows.map((row) => this.toCamelCaseDeep(row)) };
   }
 
+  private async resolveSyncCustomerTargets(
+    session: GoogleAdsSession,
+    selectedCustomerId: string,
+  ): Promise<{
+    storageCustomerId: string;
+    queryCustomerIds: string[];
+    scopeResourceIds: boolean;
+    loginCustomerIdOverride: string;
+  }> {
+    if (!session.refreshToken) {
+      throw new Error('No refresh token available for manager-account validation');
+    }
+
+    const loginCustomerId = this.getEffectiveLoginCustomerId(session);
+    const customerClient = this.client.Customer({
+      customer_id: selectedCustomerId,
+      refresh_token: session.refreshToken,
+      ...(loginCustomerId ? { login_customer_id: loginCustomerId } : {}),
+    });
+
+    const rows = await customerClient.query(`
+      SELECT
+        customer.id,
+        customer.descriptive_name,
+        customer.manager
+      FROM customer
+      LIMIT 1
+    `);
+
+    const selected = rows?.[0]?.customer;
+    const isManager = !!selected?.manager;
+
+    if (!isManager) {
+      return {
+        storageCustomerId: selectedCustomerId,
+        queryCustomerIds: [selectedCustomerId],
+        scopeResourceIds: false,
+        loginCustomerIdOverride: loginCustomerId,
+      };
+    }
+
+    const childRows = await customerClient.query(`
+      SELECT
+        customer_client.id,
+        customer_client.descriptive_name,
+        customer_client.manager,
+        customer_client.hidden
+      FROM customer_client
+      WHERE customer_client.manager = FALSE
+        AND customer_client.hidden = FALSE
+    `);
+
+    const queryCustomerIds = childRows
+      .map((row: any) => this.normalizeCustomerId(row?.customer_client?.id?.toString()))
+      .filter((id: string) => !!id);
+
+    if (queryCustomerIds.length === 0) {
+      throw new Error(
+        `Selected manager account ${selectedCustomerId} has no active client accounts available for sync.`,
+      );
+    }
+
+    return {
+      storageCustomerId: selectedCustomerId,
+      queryCustomerIds,
+      scopeResourceIds: true,
+      loginCustomerIdOverride: selectedCustomerId,
+    };
+  }
+
   private getApiVersionsToTry(): string[] {
     const preferred = this.apiVersion || 'v19';
     const fallbacks = ['v20', 'v19', 'v18', 'v17'];
@@ -612,6 +757,12 @@ export class GoogleAdsSyncService {
     return this.normalizeCustomerId(
       session.loginCustomerId || session.managerCustomerId || this.defaultLoginCustomerId,
     );
+  }
+
+  private scopeResourceId(prefix: string, value: any): string {
+    const raw = value?.toString?.() || '';
+    if (!raw) return '';
+    return prefix ? `${prefix}:${raw}` : raw;
   }
 
   private toCamelCaseDeep(value: any): any {

@@ -448,8 +448,13 @@ export class GoogleAdsService {
       throw new BadRequestException('Invalid customer ID');
     }
 
+    const selectedCustomer = await this.getCustomerDetails(session, normalizedCustomerId);
+    if (!selectedCustomer) {
+      throw new BadRequestException('Could not validate the selected Google Ads account');
+    }
+
     session.customerId = normalizedCustomerId;
-    session.customerName = customerName || `Account ${normalizedCustomerId}`;
+    session.customerName = customerName || selectedCustomer.descriptiveName || `Account ${normalizedCustomerId}`;
     if (!session.loginCustomerId && this.defaultLoginCustomerId) {
       session.loginCustomerId = this.defaultLoginCustomerId;
     }
@@ -552,6 +557,16 @@ export class GoogleAdsService {
       throw new UnauthorizedException('No valid session or customer selected');
     }
 
+    const scopedCampaign = this.parseScopedResourceId(campaignId);
+    const queryCustomerId = scopedCampaign.customerId || this.normalizeCustomerId(session.customerId);
+    const rawCampaignId = scopedCampaign.resourceId;
+    if (!/^\d+$/.test(rawCampaignId)) {
+      throw new BadRequestException('Invalid campaign ID');
+    }
+    const loginCustomerId = scopedCampaign.customerId
+      ? this.normalizeCustomerId(session.customerId)
+      : this.getEffectiveLoginCustomerId(session);
+
     const query = `
       SELECT 
         campaign.id,
@@ -564,12 +579,13 @@ export class GoogleAdsService {
         metrics.cost_micros,
         metrics.conversions
       FROM campaign
-      WHERE campaign.id = ${campaignId}
+      WHERE campaign.id = ${rawCampaignId}
     `;
 
     const customerClient = this.client.Customer({
-      customer_id: this.normalizeCustomerId(session.customerId),
+      customer_id: queryCustomerId,
       refresh_token: session.refreshToken,
+      ...(loginCustomerId ? { login_customer_id: loginCustomerId } : {}),
     });
 
     const response = await customerClient.query(query);
@@ -1050,6 +1066,18 @@ export class GoogleAdsService {
     return this.normalizeCustomerId(
       session.loginCustomerId || session.managerCustomerId || this.defaultLoginCustomerId,
     );
+  }
+
+  private parseScopedResourceId(scopedId: string): { customerId: string; resourceId: string } {
+    const raw = (scopedId || '').trim();
+    const index = raw.indexOf(':');
+    if (index <= 0) {
+      return { customerId: '', resourceId: raw };
+    }
+    return {
+      customerId: this.normalizeCustomerId(raw.slice(0, index)),
+      resourceId: raw.slice(index + 1),
+    };
   }
 
   private async executeSearchViaClient(
