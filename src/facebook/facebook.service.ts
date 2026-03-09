@@ -1098,11 +1098,18 @@ export class FacebookService {
           creativeType = 'dynamic';
         }
 
+        const videoId =
+          ad.creative.video_id ||
+          ad.creative.object_story_spec?.video_data?.video_id ||
+          undefined;
+
         creativeMap.set(creativeId, {
           id: creativeId, // Keep as string to preserve precision and match API
           name: ad.creative.name || ad.name,
           thumbnailUrl: ad.creative.thumbnail_url || ad.creative.image_url,
           imageUrl: ad.creative.image_url || ad.creative.thumbnail_url,
+          videoUrl: undefined,
+          videoId,
           creativeType,
           campaignName: ad.campaign?.name || 'Unknown Campaign',
           adsetName: ad.adset?.name || 'Unknown Ad Set',
@@ -1136,6 +1143,22 @@ export class FacebookService {
       if (creative.adsetName === 'Unknown Ad Set' && ad.adset?.name) {
         creative.adsetName = ad.adset.name;
       }
+    }
+
+    // Enrich video creatives with direct source URLs when available.
+    const videoIds = Array.from(
+      new Set(
+        Array.from(creativeMap.values())
+          .map((creative: any) => creative.videoId)
+          .filter(Boolean),
+      ),
+    );
+    const videoSourceMap = await this.fetchVideoSources(videoIds, accessToken);
+    for (const creative of creativeMap.values()) {
+      if (creative.videoId) {
+        creative.videoUrl = videoSourceMap.get(creative.videoId) || undefined;
+      }
+      delete creative.videoId;
     }
 
     // Post processing: calculate derived metrics
@@ -1177,6 +1200,30 @@ export class FacebookService {
         fatigueConfidence: 85,
       };
     });
+  }
+
+  private async fetchVideoSources(
+    videoIds: string[],
+    accessToken: string,
+  ): Promise<Map<string, string>> {
+    const sourceMap = new Map<string, string>();
+    if (!videoIds.length) return sourceMap;
+
+    const tasks = videoIds.map(async (videoId) => {
+      try {
+        const result = await this.makeGraphApiCall(`/${videoId}`, accessToken, {
+          fields: 'source',
+        });
+        if (result?.source) {
+          sourceMap.set(videoId, result.source);
+        }
+      } catch {
+        // Ignore per-video errors and continue.
+      }
+    });
+
+    await Promise.all(tasks);
+    return sourceMap;
   }
 
   async getDemographics(

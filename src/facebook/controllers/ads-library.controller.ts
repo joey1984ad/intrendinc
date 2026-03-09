@@ -74,6 +74,8 @@ export class AdsLibraryController {
       throw new BadRequestException('Ad account ID is required');
     }
 
+    const cleanAdAccountId = adAccountId.replace(/^act_/, '');
+
     const normalizedFilters = {
       region: rawFilters.region ?? 'US',
       mediaType: rawFilters.mediaType ?? 'all',
@@ -84,77 +86,18 @@ export class AdsLibraryController {
       publisherPlatforms: Array.isArray(rawFilters.publisherPlatforms) ? rawFilters.publisherPlatforms : [],
     };
 
-    // Build search parameters
-    const searchParams: Record<string, any> = {
-      search_terms: searchQuery.trim(),
-      limit: 100,
-      ad_type: 'ALL',
-      ad_active_status: 'ACTIVE',
-    };
-
-    // Region handling
-    if (normalizedFilters.region && normalizedFilters.region !== 'all') {
-      const countryCodes = Array.isArray(normalizedFilters.region)
-        ? normalizedFilters.region.filter(c => c !== 'all')
-        : [normalizedFilters.region];
-      searchParams.ad_reached_countries = countryCodes.length > 0 ? countryCodes : ['US'];
-    } else {
-      searchParams.ad_reached_countries = ['US'];
-    }
-
-    // Media type
-    if (normalizedFilters.mediaType && normalizedFilters.mediaType !== 'all') {
-      searchParams.media_type = normalizedFilters.mediaType.toUpperCase();
-    }
-
-    // Ad type
-    if (normalizedFilters.adType && normalizedFilters.adType !== 'all') {
-      const adTypeMap: Record<string, string> = {
-        political: 'POLITICAL_AND_ISSUE_ADS',
-        issue: 'POLITICAL_AND_ISSUE_ADS',
-        election: 'POLITICAL_AND_ISSUE_ADS',
-        employment: 'EMPLOYMENT_ADS',
-        financial: 'FINANCIAL_PRODUCTS_AND_SERVICES_ADS',
-        housing: 'HOUSING_ADS',
-      };
-      searchParams.ad_type = adTypeMap[normalizedFilters.adType] || 'ALL';
-    }
-
-    // Date range
-    if (normalizedFilters.dateRange && normalizedFilters.dateRange !== 'all') {
-      const now = new Date();
-      const startDate = new Date();
-      const daysMap: Record<string, number> = {
-        last_7d: 7,
-        last_30d: 30,
-        last_90d: 90,
-        last_12m: 365,
-      };
-      startDate.setDate(now.getDate() - (daysMap[normalizedFilters.dateRange] || 30));
-      searchParams.ad_delivery_date_min = startDate.toISOString().split('T')[0];
-      searchParams.ad_delivery_date_max = now.toISOString().split('T')[0];
-    }
-
-    // Build URL
+    const datePreset = this.mapDateRangeToDatePreset(normalizedFilters.dateRange);
     const fields = [
-      'id', 'page_id', 'page_name', 'ad_creation_time', 'ad_delivery_start_time',
-      'ad_delivery_stop_time', 'ad_snapshot_url', 'currency', 'spend', 'impressions',
-      'publisher_platforms', 'ad_creative_bodies', 'ad_creative_link_captions',
-      'ad_creative_link_descriptions', 'ad_creative_link_titles', 'bylines',
+      'id',
+      'name',
+      'status',
+      'preview_shareable_link',
+      'campaign{name}',
+      'adset{name}',
+      'creative{id,name,title,body,thumbnail_url,image_url,video_id,object_story_spec,asset_feed_spec}',
+      `insights.date_preset(${datePreset}){spend,impressions}`,
     ].join(',');
-
-    const queryParams = new URLSearchParams();
-    Object.entries(searchParams).forEach(([key, value]) => {
-      if (Array.isArray(value)) {
-        queryParams.append(key, JSON.stringify(value));
-      } else {
-        queryParams.append(key, String(value));
-      }
-    });
-    queryParams.append('fields', fields);
-    queryParams.append('access_token', accessToken);
-
-    const url = `https://graph.facebook.com/${this.graphApiVersion}/ads_archive?${queryParams.toString()}`;
+    const url = `https://graph.facebook.com/${this.graphApiVersion}/act_${cleanAdAccountId}/ads?fields=${encodeURIComponent(fields)}&limit=500&access_token=${encodeURIComponent(accessToken)}`;
 
     try {
       const response = await fetch(url);
@@ -177,41 +120,7 @@ export class AdsLibraryController {
       }
 
       const data = await response.json();
-
-      // Transform ads
-      const transformedAds: TransformedAd[] = (data.data || []).map((ad: any) => {
-        const spend = ad.spend || { lower_bound: '0', upper_bound: '0' };
-        const impressions = ad.impressions || { lower_bound: '0', upper_bound: '0' };
-        const spendValue = parseFloat(spend.lower_bound || '0');
-        const impressionsValue = parseInt(impressions.lower_bound || '0');
-
-        return {
-          id: ad.id,
-          adCreativeBody: ad.ad_creative_bodies?.[0] || '',
-          adCreativeLinkTitle: ad.ad_creative_link_titles?.[0] || '',
-          adCreativeLinkDescription: ad.ad_creative_link_descriptions?.[0] || '',
-          adCreativeLinkCaption: ad.ad_creative_link_captions?.[0] || '',
-          imageUrl: null,
-          videoUrl: null,
-          thumbnailUrl: null,
-          pageName: ad.page_name || 'Unknown Page',
-          pageId: ad.page_id || '',
-          adDeliveryStartTime: ad.ad_delivery_start_time || ad.ad_creation_time || '',
-          adDeliveryStopTime: ad.ad_delivery_stop_time || null,
-          adSnapshotUrl: ad.ad_snapshot_url || `https://www.facebook.com/ads/library/?id=${ad.id}`,
-          currency: ad.currency || 'USD',
-          spend: { lowerBound: spend.lower_bound || '0', upperBound: spend.upper_bound || '0' },
-          impressions: { lowerBound: impressions.lower_bound || '0', upperBound: impressions.upper_bound || '0' },
-          publisherPlatforms: (ad.publisher_platforms || []).map((p: string) => p.toLowerCase()),
-          mediaType: 'image' as const,
-          status: ad.ad_delivery_stop_time ? 'INACTIVE' : 'ACTIVE',
-          region: Array.isArray(normalizedFilters.region) ? normalizedFilters.region.join(', ') : normalizedFilters.region || 'US',
-          disclaimer: ad.bylines || null,
-          adType: null,
-          adCategory: null,
-          _meta: { spendValue, impressionsValue },
-        };
-      });
+      const transformedAds = this.transformAdAccountAds(data.data || [], normalizedFilters, searchQuery);
 
       // Apply client-side filters
       const minSpendFilter = normalizedFilters.minSpend ? parseFloat(normalizedFilters.minSpend) : null;
@@ -339,49 +248,45 @@ export class AdsLibraryController {
   async exportAds(
     @Body() body: {
       accessToken: string;
-      searchQuery: string;
+      searchQuery?: string;
+      adAccountId: string;
       filters?: AdsLibraryFilters;
       format?: 'csv' | 'json';
     },
     @Res() res: Response,
   ) {
-    const { accessToken, searchQuery, filters = {}, format = 'csv' } = body;
+    const { accessToken, searchQuery = '', adAccountId, filters = {}, format = 'csv' } = body;
 
     if (!accessToken) {
       throw new BadRequestException('Access token is required');
     }
 
-    if (!searchQuery || searchQuery.trim() === '') {
-      throw new BadRequestException('Search query is required');
+    if (!adAccountId) {
+      throw new BadRequestException('Ad account ID is required');
     }
 
-    // Build search params
-    const searchParams: Record<string, any> = {
-      search_terms: searchQuery.trim(),
-      limit: 1000,
-      ad_reached_countries: ['US'],
+    const cleanAdAccountId = adAccountId.replace(/^act_/, '');
+    const normalizedFilters = {
+      region: filters.region ?? 'US',
+      mediaType: filters.mediaType ?? 'all',
+      adType: filters.adType ?? 'all',
+      dateRange: filters.dateRange ?? 'last_30d',
+      minSpend: filters.minSpend ?? '',
+      maxSpend: filters.maxSpend ?? '',
+      publisherPlatforms: Array.isArray(filters.publisherPlatforms) ? filters.publisherPlatforms : [],
     };
-
-    if (filters.region && filters.region !== 'all') {
-      searchParams.ad_reached_countries = Array.isArray(filters.region) ? filters.region : [filters.region];
-    }
-
-    if (filters.dateRange && filters.dateRange !== 'all') {
-      const now = new Date();
-      const startDate = new Date();
-      const daysMap: Record<string, number> = { last_7d: 7, last_30d: 30, last_90d: 90, last_12m: 365 };
-      startDate.setDate(now.getDate() - (daysMap[filters.dateRange] || 30));
-      searchParams.ad_delivery_date_min = startDate.toISOString().split('T')[0];
-      searchParams.ad_delivery_date_max = now.toISOString().split('T')[0];
-    }
-
-    const queryParams = new URLSearchParams();
-    Object.entries(searchParams).forEach(([key, value]) => {
-      queryParams.append(key, Array.isArray(value) ? JSON.stringify(value) : String(value));
-    });
-    queryParams.append('access_token', accessToken);
-
-    const url = `https://graph.facebook.com/${this.graphApiVersion}/ads_archive?${queryParams.toString()}`;
+    const datePreset = this.mapDateRangeToDatePreset(normalizedFilters.dateRange);
+    const fields = [
+      'id',
+      'name',
+      'status',
+      'preview_shareable_link',
+      'campaign{name}',
+      'adset{name}',
+      'creative{id,name,title,body,thumbnail_url,image_url,video_id,object_story_spec,asset_feed_spec}',
+      `insights.date_preset(${datePreset}){spend,impressions}`,
+    ].join(',');
+    const url = `https://graph.facebook.com/${this.graphApiVersion}/act_${cleanAdAccountId}/ads?fields=${encodeURIComponent(fields)}&limit=500&access_token=${encodeURIComponent(accessToken)}`;
 
     try {
       const response = await fetch(url);
@@ -395,21 +300,22 @@ export class AdsLibraryController {
       }
 
       const data = await response.json();
-      const ads = (data.data || []).map((ad: any) => ({
+      const transformedAds = this.transformAdAccountAds(data.data || [], normalizedFilters, searchQuery);
+      const ads = transformedAds.map((ad) => ({
         id: ad.id,
-        pageName: ad.page_name || 'Unknown Page',
-        pageId: ad.page_id || '',
-        adCreativeBody: ad.ad_creative_bodies?.[0] || '',
-        adCreativeLinkTitle: ad.ad_creative_link_titles?.[0] || '',
-        adSnapshotUrl: ad.ad_snapshot_url || '',
-        adDeliveryStartTime: ad.ad_delivery_start_time || '',
-        adDeliveryStopTime: ad.ad_delivery_stop_time || '',
+        pageName: ad.pageName,
+        pageId: ad.pageId,
+        adCreativeBody: ad.adCreativeBody,
+        adCreativeLinkTitle: ad.adCreativeLinkTitle,
+        adSnapshotUrl: ad.adSnapshotUrl,
+        adDeliveryStartTime: ad.adDeliveryStartTime,
+        adDeliveryStopTime: ad.adDeliveryStopTime || '',
         currency: ad.currency || 'USD',
-        spendLowerBound: ad.spend?.lower_bound || '0',
-        spendUpperBound: ad.spend?.upper_bound || '0',
-        impressionsLowerBound: ad.impressions?.lower_bound || '0',
-        impressionsUpperBound: ad.impressions?.upper_bound || '0',
-        publisherPlatforms: (ad.publisher_platforms || []).join(', '),
+        spendLowerBound: ad.spend?.lowerBound || '0',
+        spendUpperBound: ad.spend?.upperBound || '0',
+        impressionsLowerBound: ad.impressions?.lowerBound || '0',
+        impressionsUpperBound: ad.impressions?.upperBound || '0',
+        publisherPlatforms: (ad.publisherPlatforms || []).join(', '),
       }));
 
       if (format === 'csv') {
@@ -432,7 +338,8 @@ export class AdsLibraryController {
         ]);
 
         const csvContent = [headers, ...csvRows].map(row => row.join(',')).join('\n');
-        const filename = `ads-library-${searchQuery.replace(/[^a-z0-9]/gi, '-')}-${new Date().toISOString().split('T')[0]}.csv`;
+        const safeQuery = (searchQuery || 'account').replace(/[^a-z0-9]/gi, '-');
+        const filename = `ads-library-${safeQuery}-${new Date().toISOString().split('T')[0]}.csv`;
 
         res.setHeader('Content-Type', 'text/csv');
         res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -453,5 +360,115 @@ export class AdsLibraryController {
         error: error instanceof Error ? error.message : 'An unexpected error occurred',
       });
     }
+  }
+
+  private mapDateRangeToDatePreset(dateRange: string): string {
+    const presets: Record<string, string> = {
+      last_7d: 'last_7d',
+      last_14d: 'last_14d',
+      last_30d: 'last_30d',
+      last_60d: 'last_90d',
+      last_90d: 'last_90d',
+      this_month: 'this_month',
+      last_month: 'last_month',
+      last_12m: 'last_year',
+      all: 'maximum',
+    };
+    return presets[dateRange] || 'last_30d';
+  }
+
+  private transformAdAccountAds(
+    ads: any[],
+    filters: {
+      region: string | string[];
+      mediaType: string;
+      adType: string;
+      dateRange: string;
+      minSpend: string;
+      maxSpend: string;
+      publisherPlatforms: string[];
+    },
+    searchQuery: string,
+  ): TransformedAd[] {
+    const query = (searchQuery || '').trim().toLowerCase();
+    const requiredPlatforms = (filters.publisherPlatforms || []).map((p) => p.toLowerCase());
+    const minSpendFilter = filters.minSpend ? parseFloat(filters.minSpend) : null;
+    const maxSpendFilter = filters.maxSpend ? parseFloat(filters.maxSpend) : null;
+
+    const transformed: TransformedAd[] = (ads || []).map((ad: any) => {
+      const insight = ad.insights?.data?.[0] || {};
+      const spendValue = parseFloat(insight.spend || '0');
+      const impressionsValue = parseInt(insight.impressions || '0', 10) || 0;
+      const creative = ad.creative || {};
+
+      const mediaType: TransformedAd['mediaType'] =
+        creative.video_id || creative.object_story_spec?.video_data
+          ? 'video'
+          : creative.object_story_spec?.link_data?.child_attachments
+            ? 'carousel'
+            : creative.asset_feed_spec
+              ? 'dynamic'
+              : 'image';
+
+      const adBody =
+        creative.body ||
+        creative.object_story_spec?.link_data?.message ||
+        creative.object_story_spec?.video_data?.message ||
+        '';
+      const adTitle =
+        creative.title ||
+        creative.object_story_spec?.link_data?.name ||
+        creative.name ||
+        ad.name ||
+        '';
+      const adDescription =
+        creative.object_story_spec?.link_data?.description ||
+        creative.object_story_spec?.video_data?.title ||
+        '';
+      const adCaption = creative.object_story_spec?.link_data?.caption || '';
+      const publisherPlatforms = ['facebook', 'instagram'];
+
+      return {
+        id: String(ad.id || ''),
+        adCreativeBody: adBody,
+        adCreativeLinkTitle: adTitle,
+        adCreativeLinkDescription: adDescription,
+        adCreativeLinkCaption: adCaption,
+        imageUrl: creative.image_url || creative.thumbnail_url || null,
+        videoUrl: null,
+        thumbnailUrl: creative.thumbnail_url || creative.image_url || null,
+        pageName: ad.campaign?.name || 'Your Ad Account',
+        pageId: '',
+        adDeliveryStartTime: ad.created_time || ad.updated_time || new Date().toISOString(),
+        adDeliveryStopTime: null,
+        adSnapshotUrl: ad.preview_shareable_link || `https://www.facebook.com/ads/library/?id=${ad.id}`,
+        currency: 'USD',
+        spend: { lowerBound: String(spendValue), upperBound: String(spendValue) },
+        impressions: { lowerBound: String(impressionsValue), upperBound: String(impressionsValue) },
+        publisherPlatforms,
+        mediaType,
+        status: String(ad.status || 'ACTIVE').toUpperCase(),
+        region: Array.isArray(filters.region) ? filters.region.join(', ') : filters.region || 'US',
+        disclaimer: null,
+        adType: null,
+        adCategory: null,
+        _meta: { spendValue, impressionsValue },
+      };
+    });
+
+    return transformed.filter((ad) => {
+      const haystack = `${ad.adCreativeBody} ${ad.adCreativeLinkTitle} ${ad.pageName}`.toLowerCase();
+      if (query && !haystack.includes(query)) return false;
+
+      if (filters.mediaType !== 'all' && ad.mediaType !== filters.mediaType) return false;
+      if (minSpendFilter !== null && (ad._meta?.spendValue || 0) < minSpendFilter) return false;
+      if (maxSpendFilter !== null && (ad._meta?.spendValue || 0) > maxSpendFilter) return false;
+      if (requiredPlatforms.length > 0) {
+        const adPlatforms = ad.publisherPlatforms.map((p) => p.toLowerCase());
+        if (!requiredPlatforms.every((p) => adPlatforms.includes(p))) return false;
+      }
+
+      return true;
+    });
   }
 }
