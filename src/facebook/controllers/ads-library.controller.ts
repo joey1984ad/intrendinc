@@ -97,30 +97,16 @@ export class AdsLibraryController {
       'creative{id,name,title,body,thumbnail_url,image_url,video_id,object_story_spec,asset_feed_spec}',
       `insights.date_preset(${datePreset}){spend,impressions}`,
     ].join(',');
-    const url = `https://graph.facebook.com/${this.graphApiVersion}/act_${cleanAdAccountId}/ads?fields=${encodeURIComponent(fields)}&limit=500&access_token=${encodeURIComponent(accessToken)}`;
 
     try {
-      const response = await fetch(url);
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        
-        if (errorData.error?.error_subcode === 2332002) {
-          return {
-            success: false,
-            error: 'Ads Library API Access Required',
-            message: 'Your app requires approval for the Ads Library API.',
-          };
-        }
-
-        return {
-          success: false,
-          error: errorData.error?.message || 'Facebook API error',
-        };
-      }
-
-      const data = await response.json();
-      const transformedAds = this.transformAdAccountAds(data.data || [], normalizedFilters, searchQuery);
+      const rawAds = await this.fetchAccountAdsInChunks({
+        accessToken,
+        adAccountId: cleanAdAccountId,
+        fields,
+        pageSize: 50,
+        maxRequests: 6,
+      });
+      const transformedAds = this.transformAdAccountAds(rawAds, normalizedFilters, searchQuery);
 
       // Apply client-side filters
       const minSpendFilter = normalizedFilters.minSpend ? parseFloat(normalizedFilters.minSpend) : null;
@@ -286,21 +272,17 @@ export class AdsLibraryController {
       'creative{id,name,title,body,thumbnail_url,image_url,video_id,object_story_spec,asset_feed_spec}',
       `insights.date_preset(${datePreset}){spend,impressions}`,
     ].join(',');
-    const url = `https://graph.facebook.com/${this.graphApiVersion}/act_${cleanAdAccountId}/ads?fields=${encodeURIComponent(fields)}&limit=500&access_token=${encodeURIComponent(accessToken)}`;
+    const cleanQuery = (searchQuery || '').trim();
 
     try {
-      const response = await fetch(url);
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        return res.status(response.status).json({
-          success: false,
-          error: errorData.error?.message || 'Facebook API error',
-        });
-      }
-
-      const data = await response.json();
-      const transformedAds = this.transformAdAccountAds(data.data || [], normalizedFilters, searchQuery);
+      const rawAds = await this.fetchAccountAdsInChunks({
+        accessToken,
+        adAccountId: cleanAdAccountId,
+        fields,
+        pageSize: 50,
+        maxRequests: 12,
+      });
+      const transformedAds = this.transformAdAccountAds(rawAds, normalizedFilters, cleanQuery);
       const ads = transformedAds.map((ad) => ({
         id: ad.id,
         pageName: ad.pageName,
@@ -338,7 +320,7 @@ export class AdsLibraryController {
         ]);
 
         const csvContent = [headers, ...csvRows].map(row => row.join(',')).join('\n');
-        const safeQuery = (searchQuery || 'account').replace(/[^a-z0-9]/gi, '-');
+        const safeQuery = (cleanQuery || 'account').replace(/[^a-z0-9]/gi, '-');
         const filename = `ads-library-${safeQuery}-${new Date().toISOString().split('T')[0]}.csv`;
 
         res.setHeader('Content-Type', 'text/csv');
@@ -348,7 +330,7 @@ export class AdsLibraryController {
 
       return res.json({
         success: true,
-        searchQuery,
+        searchQuery: cleanQuery,
         filters,
         totalResults: ads.length,
         ads,
@@ -470,5 +452,48 @@ export class AdsLibraryController {
 
       return true;
     });
+  }
+
+  private async fetchAccountAdsInChunks(params: {
+    accessToken: string;
+    adAccountId: string;
+    fields: string;
+    pageSize: number;
+    maxRequests: number;
+  }): Promise<any[]> {
+    const { accessToken, adAccountId, fields, pageSize, maxRequests } = params;
+    const collected: any[] = [];
+    let afterCursor: string | undefined;
+
+    for (let requestIndex = 0; requestIndex < maxRequests; requestIndex++) {
+      const query = new URLSearchParams({
+        fields,
+        limit: String(pageSize),
+        access_token: accessToken,
+      });
+      if (afterCursor) {
+        query.set('after', afterCursor);
+      }
+
+      const url = `https://graph.facebook.com/${this.graphApiVersion}/act_${adAccountId}/ads?${query.toString()}`;
+      const response = await fetch(url);
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error?.message || 'Facebook API error');
+      }
+
+      const data = await response.json();
+      const chunk = data.data || [];
+      collected.push(...chunk);
+
+      const nextCursor = data?.paging?.cursors?.after;
+      if (!nextCursor || chunk.length === 0) {
+        break;
+      }
+      afterCursor = nextCursor;
+    }
+
+    return collected;
   }
 }
