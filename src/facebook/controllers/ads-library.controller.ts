@@ -373,6 +373,10 @@ export class AdsLibraryController {
     searchQuery: string,
   ): TransformedAd[] {
     const query = (searchQuery || '').trim().toLowerCase();
+    const queryTokens = query
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter((token) => token.length > 1);
     const requiredPlatforms = (filters.publisherPlatforms || []).map((p) => p.toLowerCase());
     const minSpendFilter = filters.minSpend ? parseFloat(filters.minSpend) : null;
     const maxSpendFilter = filters.maxSpend ? parseFloat(filters.maxSpend) : null;
@@ -440,7 +444,11 @@ export class AdsLibraryController {
 
     return transformed.filter((ad) => {
       const haystack = `${ad.adCreativeBody} ${ad.adCreativeLinkTitle} ${ad.pageName}`.toLowerCase();
-      if (query && !haystack.includes(query)) return false;
+      if (query) {
+        const exactMatch = haystack.includes(query);
+        const tokenMatch = queryTokens.some((token) => haystack.includes(token));
+        if (!exactMatch && !tokenMatch) return false;
+      }
 
       if (filters.mediaType !== 'all' && ad.mediaType !== filters.mediaType) return false;
       if (minSpendFilter !== null && (ad._meta?.spendValue || 0) < minSpendFilter) return false;
