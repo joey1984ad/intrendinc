@@ -11,6 +11,10 @@ import { ConfigService } from '@nestjs/config';
 export class FacebookService {
   private readonly logger = new Logger(FacebookService.name);
   private readonly graphApiVersion = 'v23.0';
+  private readonly inFlightRequests = new Map<string, Promise<any>>();
+  private readonly adAccountCooldownUntil = new Map<string, number>();
+  private readonly permissionDeniedUntil = new Map<string, number>();
+  private readonly videoSourceCache = new Map<string, { source: string; expiresAt: number }>();
 
   constructor(
     @InjectRepository(FacebookSession)
@@ -70,22 +74,84 @@ export class FacebookService {
         url.searchParams.append(key, value);
       });
     }
+    const requestUrl = url.toString();
+    const adAccountId = this.extractAdAccountIdFromEndpoint(endpoint);
+    const now = Date.now();
 
-    try {
-      const response = await fetch(url.toString());
-
-      if (!response.ok) {
-        const error = await response.json();
+    if (adAccountId) {
+      const permissionBlockedUntil = this.permissionDeniedUntil.get(adAccountId) || 0;
+      if (permissionBlockedUntil > now) {
         throw new Error(
-          error.error?.message || `Facebook API error: ${response.status}`,
+          'Facebook permissions missing: ad account owner must grant ads_read and ads_management.',
         );
       }
 
-      return response.json();
+      const cooldownUntil = this.adAccountCooldownUntil.get(adAccountId) || 0;
+      if (cooldownUntil > now) {
+        throw new Error('User request limit reached');
+      }
+    }
+
+    const existingRequest = this.inFlightRequests.get(requestUrl);
+    if (existingRequest) {
+      return existingRequest;
+    }
+
+    try {
+      const requestPromise = (async () => {
+        const response = await fetch(requestUrl);
+
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({}));
+          const errorMessage =
+            error.error?.message || `Facebook API error: ${response.status}`;
+
+          if (adAccountId) {
+            if (this.isPermissionErrorMessage(errorMessage)) {
+              this.permissionDeniedUntil.set(adAccountId, now + 10 * 60 * 1000);
+            } else if (this.isUserRateLimitError(errorMessage)) {
+              this.adAccountCooldownUntil.set(adAccountId, now + 30 * 1000);
+            }
+          }
+
+          throw new Error(errorMessage);
+        }
+
+        return response.json();
+      })();
+
+      this.inFlightRequests.set(requestUrl, requestPromise);
+      return await requestPromise;
     } catch (error) {
       this.logger.error(`Graph API call failed: ${error}`);
       throw error;
+    } finally {
+      this.inFlightRequests.delete(requestUrl);
     }
+  }
+
+  private extractAdAccountIdFromEndpoint(endpoint: string): string | null {
+    const match = endpoint.match(/\/act_(\d+)\//);
+    return match?.[1] || null;
+  }
+
+  private isPermissionErrorMessage(message: string): boolean {
+    const normalized = String(message || '').toLowerCase();
+    return (
+      normalized.includes('(#200)') ||
+      normalized.includes('ads_management') ||
+      normalized.includes('ads_read')
+    );
+  }
+
+  private isUserRateLimitError(message: string): boolean {
+    const normalized = String(message || '').toLowerCase();
+    return (
+      normalized.includes('user request limit reached') ||
+      normalized.includes('application request limit reached') ||
+      normalized.includes('too many calls') ||
+      normalized.includes('rate limit')
+    );
   }
 
   private isReduceDataError(error: unknown): boolean {
@@ -1209,20 +1275,42 @@ export class FacebookService {
     const sourceMap = new Map<string, string>();
     if (!videoIds.length) return sourceMap;
 
-    const tasks = videoIds.map(async (videoId) => {
-      try {
-        const result = await this.makeGraphApiCall(`/${videoId}`, accessToken, {
-          fields: 'source',
-        });
-        if (result?.source) {
-          sourceMap.set(videoId, result.source);
-        }
-      } catch {
-        // Ignore per-video errors and continue.
+    const now = Date.now();
+    const unresolved: string[] = [];
+    for (const videoId of videoIds) {
+      const cached = this.videoSourceCache.get(videoId);
+      if (cached && cached.expiresAt > now) {
+        sourceMap.set(videoId, cached.source);
+      } else {
+        unresolved.push(videoId);
       }
-    });
+    }
 
-    await Promise.all(tasks);
+    const maxLookupsPerRequest = 20;
+    const concurrency = 4;
+    const limitedIds = unresolved.slice(0, maxLookupsPerRequest);
+
+    for (let i = 0; i < limitedIds.length; i += concurrency) {
+      const chunk = limitedIds.slice(i, i + concurrency);
+      const tasks = chunk.map(async (videoId) => {
+        try {
+          const result = await this.makeGraphApiCall(`/${videoId}`, accessToken, {
+            fields: 'source',
+          });
+          if (result?.source) {
+            sourceMap.set(videoId, result.source);
+            this.videoSourceCache.set(videoId, {
+              source: result.source,
+              expiresAt: Date.now() + 12 * 60 * 60 * 1000,
+            });
+          }
+        } catch {
+          // Ignore per-video errors and continue.
+        }
+      });
+      await Promise.all(tasks);
+    }
+
     return sourceMap;
   }
 

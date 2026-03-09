@@ -205,11 +205,19 @@ export class FacebookController {
       return { success: false, error: 'No Facebook session found' };
     }
 
-    const creatives = await this.facebookService.getCreatives(
-      adAccountId,
-      session.accessToken,
-    );
-    return { success: true, creatives };
+    try {
+      const creatives = await this.facebookService.getCreatives(
+        adAccountId,
+        session.accessToken,
+      );
+      return { success: true, creatives };
+    } catch (error) {
+      return {
+        success: false,
+        creatives: [],
+        error: error instanceof Error ? error.message : 'Failed to fetch creatives',
+      };
+    }
   }
 
   // Demographics
@@ -312,12 +320,22 @@ export class FacebookController {
       accessToken = session.accessToken;
     }
 
-    const result = await this.facebookService.getAdsets(
-      body.adAccountId.replace('act_', ''),
-      accessToken,
-      body.dateRange || 'last_30d',
-    );
-    return { success: true, ...result };
+    try {
+      const result = await this.facebookService.getAdsets(
+        body.adAccountId.replace('act_', ''),
+        accessToken,
+        body.dateRange || 'last_30d',
+      );
+      return { success: true, ...result };
+    } catch (error) {
+      return {
+        success: false,
+        adsets: [],
+        dateRange: body.dateRange || 'last_30d',
+        totalCount: 0,
+        error: error instanceof Error ? error.message : 'Failed to fetch adsets',
+      };
+    }
   }
 
   // Ads
@@ -374,12 +392,20 @@ export class FacebookController {
       accessToken = session.accessToken;
     }
 
-    const creatives = await this.facebookService.getCreatives(
-      body.adAccountId.replace('act_', ''),
-      accessToken,
-      body.dateRange || 'last_30d',
-    );
-    return { success: true, creatives };
+    try {
+      const creatives = await this.facebookService.getCreatives(
+        body.adAccountId.replace('act_', ''),
+        accessToken,
+        body.dateRange || 'last_30d',
+      );
+      return { success: true, creatives };
+    } catch (error) {
+      return {
+        success: false,
+        creatives: [],
+        error: error instanceof Error ? error.message : 'Failed to fetch creatives',
+      };
+    }
   }
 
   // Insights (Daily breakdown for InsightsGraph component)
