@@ -480,7 +480,21 @@ export class AdsLibraryController {
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error?.message || 'Facebook API error');
+        const fbError = errorData?.error || {};
+        const fbCode = fbError?.code;
+        const fbMessage = String(fbError?.message || '');
+
+        if (
+          fbCode === 200 ||
+          fbMessage.includes('ads_management') ||
+          fbMessage.includes('ads_read')
+        ) {
+          throw new Error(
+            'Facebook permissions missing: ad account owner must grant ads_read and ads_management.',
+          );
+        }
+
+        throw new Error(fbMessage || 'Facebook API error');
       }
 
       const data = await response.json();
