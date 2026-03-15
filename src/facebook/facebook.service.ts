@@ -218,7 +218,7 @@ export class FacebookService {
       accessToken,
       {
         fields:
-          'id,name,status,adset_id,campaign_id,creative{id,name,thumbnail_url,image_url}',
+          'id,name,status,adset_id,campaign_id,creative{id,name,thumbnail_url,image_url,object_story_spec,asset_feed_spec}',
         limit: '100',
       },
       [80, 60, 40, 25],
@@ -313,8 +313,18 @@ export class FacebookService {
         creative: ad.creative
           ? {
               ...ad.creative,
-              thumbnailUrl: ad.creative.thumbnail_url,
-              imageUrl: ad.creative.image_url,
+              thumbnailUrl: ad.creative.thumbnail_url || ad.creative.image_url,
+              imageUrl: ad.creative.object_story_spec?.link_data?.picture ||
+                ad.creative.object_story_spec?.video_data?.image_url ||
+                ad.creative.object_story_spec?.photo_data?.url ||
+                ad.creative.object_story_spec?.link_data?.child_attachments?.[0]?.picture ||
+                ad.creative.asset_feed_spec?.images?.[0]?.url ||
+                ad.creative.image_url ||
+                ad.creative.thumbnail_url ||
+                null,
+              videoUrl: ad.creative.object_story_spec?.video_data?.video_url ||
+                ad.creative.asset_feed_spec?.videos?.[0]?.url ||
+                null,
             }
           : undefined,
       };
@@ -1173,8 +1183,17 @@ export class FacebookService {
           id: creativeId, // Keep as string to preserve precision and match API
           name: ad.creative.name || ad.name,
           thumbnailUrl: ad.creative.thumbnail_url || ad.creative.image_url,
-          imageUrl: ad.creative.image_url || ad.creative.thumbnail_url,
-          videoUrl: undefined,
+          imageUrl: ad.creative.object_story_spec?.link_data?.picture ||
+            ad.creative.object_story_spec?.video_data?.image_url ||
+            ad.creative.object_story_spec?.photo_data?.url ||
+            ad.creative.object_story_spec?.link_data?.child_attachments?.[0]?.picture ||
+            ad.creative.asset_feed_spec?.images?.[0]?.url ||
+            ad.creative.image_url ||
+            ad.creative.thumbnail_url ||
+            null,
+          videoUrl: ad.creative.object_story_spec?.video_data?.video_url ||
+            ad.creative.asset_feed_spec?.videos?.[0]?.url ||
+            null,
           videoId,
           creativeType,
           campaignName: ad.campaign?.name || 'Unknown Campaign',
@@ -1605,14 +1624,24 @@ export class FacebookService {
     accessToken: string,
   ): Promise<any> {
     const result = await this.makeGraphApiCall(`/${creativeId}`, accessToken, {
-      fields: 'id,name,title,body,thumbnail_url,image_url,object_story_spec',
+      fields: 'id,name,title,body,thumbnail_url,image_url,object_story_spec,asset_feed_spec,video_id',
     });
 
     // Transform snake_case to camelCase for frontend compatibility
     return {
       ...result,
-      thumbnailUrl: result.thumbnail_url,
-      imageUrl: result.image_url,
+      thumbnailUrl: result.thumbnail_url || result.image_url,
+      imageUrl: result.object_story_spec?.link_data?.picture ||
+        result.object_story_spec?.video_data?.image_url ||
+        result.object_story_spec?.photo_data?.url ||
+        result.object_story_spec?.link_data?.child_attachments?.[0]?.picture ||
+        result.asset_feed_spec?.images?.[0]?.url ||
+        result.image_url ||
+        result.thumbnail_url ||
+        null,
+      videoUrl: result.object_story_spec?.video_data?.video_url ||
+        result.asset_feed_spec?.videos?.[0]?.url ||
+        null,
     };
   }
 }
