@@ -15,6 +15,7 @@ export class FacebookService {
   private readonly adAccountCooldownUntil = new Map<string, number>();
   private readonly permissionDeniedUntil = new Map<string, number>();
   private readonly videoSourceCache = new Map<string, { source: string; expiresAt: number }>();
+  private readonly imageSourceCache = new Map<string, { url: string; expiresAt: number }>();
 
   constructor(
     @InjectRepository(FacebookSession)
@@ -218,7 +219,7 @@ export class FacebookService {
       accessToken,
       {
         fields:
-          'id,name,status,adset_id,campaign_id,creative{id,name,thumbnail_url,image_url,object_story_spec,asset_feed_spec}',
+          'id,name,status,adset_id,campaign_id,creative{id,name,thumbnail_url,image_url,image_hash,video_id,object_story_spec,asset_feed_spec}',
         limit: '100',
       },
       [80, 60, 40, 25],
@@ -290,9 +291,37 @@ export class FacebookService {
       });
     }
 
+    const imageHashes = new Set<string>();
+    const videoIds = new Set<string>();
+    
+    (adsResult.data || []).forEach((ad: any) => {
+      if (!ad.creative) return;
+      const hash = this.extractImageHash(ad.creative);
+      if (hash) imageHashes.add(hash);
+      
+      const vId = ad.creative.video_id || ad.creative.object_story_spec?.video_data?.video_id;
+      if (vId) videoIds.add(vId);
+    });
+    
+    const [imageSourceMap, videoSourceMap] = await Promise.all([
+      this.fetchImageSources(Array.from(imageHashes), adAccountId, accessToken),
+      this.fetchVideoSources(Array.from(videoIds), accessToken),
+    ]);
+
     const transformedAds = (adsResult.data || []).map((ad: any) => {
       const adId = String(ad.id || '');
       const insight = adInsightsById.get(adId) || this.getZeroMetrics();
+
+      let enhancedImageUrl = undefined;
+      let enhancedVideoUrl = undefined;
+      
+      if (ad.creative) {
+         const hash = this.extractImageHash(ad.creative);
+         if (hash) enhancedImageUrl = imageSourceMap.get(hash);
+         
+         const vId = ad.creative.video_id || ad.creative.object_story_spec?.video_data?.video_id;
+         if (vId) enhancedVideoUrl = videoSourceMap.get(vId);
+      }
 
       return {
         ...ad,
@@ -314,7 +343,8 @@ export class FacebookService {
           ? {
               ...ad.creative,
               thumbnailUrl: ad.creative.thumbnail_url || ad.creative.image_url,
-              imageUrl: ad.creative.object_story_spec?.link_data?.picture ||
+              imageUrl: enhancedImageUrl || 
+                ad.creative.object_story_spec?.link_data?.picture ||
                 ad.creative.object_story_spec?.video_data?.image_url ||
                 ad.creative.object_story_spec?.photo_data?.url ||
                 ad.creative.object_story_spec?.link_data?.child_attachments?.[0]?.picture ||
@@ -322,7 +352,8 @@ export class FacebookService {
                 ad.creative.image_url ||
                 ad.creative.thumbnail_url ||
                 null,
-              videoUrl: ad.creative.object_story_spec?.video_data?.video_url ||
+              videoUrl: enhancedVideoUrl || 
+                ad.creative.object_story_spec?.video_data?.video_url ||
                 ad.creative.asset_feed_spec?.videos?.[0]?.url ||
                 null,
             }
@@ -1123,7 +1154,7 @@ export class FacebookService {
           'id',
           'name',
           'status',
-          'creative{id,name,thumbnail_url,image_url,object_story_spec,asset_feed_spec,video_id}',
+          'creative{id,name,thumbnail_url,image_url,image_hash,object_story_spec,asset_feed_spec,video_id}',
           'campaign{name}',
           'adset{name}',
           `insights.${insightsDateSpecifier}{spend,clicks,impressions,ctr,cpc,actions,action_values,reach,frequency}`,
@@ -1178,6 +1209,8 @@ export class FacebookService {
           ad.creative.video_id ||
           ad.creative.object_story_spec?.video_data?.video_id ||
           undefined;
+          
+        const imageHash = this.extractImageHash(ad.creative);
 
         creativeMap.set(creativeId, {
           id: creativeId, // Keep as string to preserve precision and match API
@@ -1195,6 +1228,7 @@ export class FacebookService {
             ad.creative.asset_feed_spec?.videos?.[0]?.url ||
             null,
           videoId,
+          imageHash,
           creativeType,
           campaignName: ad.campaign?.name || 'Unknown Campaign',
           adsetName: ad.adset?.name || 'Unknown Ad Set',
@@ -1230,20 +1264,38 @@ export class FacebookService {
       }
     }
 
-    // Enrich video creatives with direct source URLs when available.
+    // Enrich creatives with direct high-res source URLs when available.
     const videoIds = Array.from(
       new Set(
         Array.from(creativeMap.values())
           .map((creative: any) => creative.videoId)
           .filter(Boolean),
       ),
-    );
-    const videoSourceMap = await this.fetchVideoSources(videoIds, accessToken);
+    ) as string[];
+    
+    const imageHashes = Array.from(
+      new Set(
+        Array.from(creativeMap.values())
+          .map((creative: any) => creative.imageHash)
+          .filter(Boolean),
+      ),
+    ) as string[];
+    
+    const [videoSourceMap, imageSourceMap] = await Promise.all([
+      this.fetchVideoSources(videoIds, accessToken),
+      this.fetchImageSources(imageHashes, adAccountId, accessToken),
+    ]);
+
     for (const creative of creativeMap.values()) {
-      if (creative.videoId) {
-        creative.videoUrl = videoSourceMap.get(creative.videoId) || undefined;
+      if (creative.videoId && videoSourceMap.has(creative.videoId)) {
+        creative.videoUrl = videoSourceMap.get(creative.videoId);
+      }
+      if (creative.imageHash && imageSourceMap.has(creative.imageHash)) {
+        // High-res image from hash!
+        creative.imageUrl = imageSourceMap.get(creative.imageHash);
       }
       delete creative.videoId;
+      delete creative.imageHash;
     }
 
     // Post processing: calculate derived metrics
@@ -1331,6 +1383,103 @@ export class FacebookService {
     }
 
     return sourceMap;
+  }
+  
+  public async enrichAdsWithHighResMedia(ads: any[], adAccountId: string, accessToken: string): Promise<any[]> {
+    const imageHashes = new Set<string>();
+    const videoIds = new Set<string>();
+    
+    ads.forEach((ad: any) => {
+      if (!ad.creative) return;
+      
+      const hash = this.extractImageHash(ad.creative);
+      if (hash) imageHashes.add(hash);
+      
+      const vId = ad.creative.video_id || ad.creative.object_story_spec?.video_data?.video_id;
+      if (vId) videoIds.add(vId);
+    });
+    
+    const [imageSourceMap, videoSourceMap] = await Promise.all([
+      this.fetchImageSources(Array.from(imageHashes), adAccountId, accessToken),
+      this.fetchVideoSources(Array.from(videoIds), accessToken),
+    ]);
+
+    return ads.map((ad: any) => {
+      if (!ad.creative) return ad;
+      const hash = this.extractImageHash(ad.creative);
+      const enhancedImageUrl = hash ? imageSourceMap.get(hash) : undefined;
+      const vId = ad.creative.video_id || ad.creative.object_story_spec?.video_data?.video_id;
+      const enhancedVideoUrl = vId ? videoSourceMap.get(vId) : undefined;
+      
+      return {
+        ...ad,
+        creative: {
+          ...ad.creative,
+          enhancedImageUrl,
+          enhancedVideoUrl
+        }
+      };
+    });
+  }
+
+  private extractImageHash(creative: any): string | null {
+    if (!creative) return null;
+    let hash = creative.image_hash;
+    if (!hash && creative.object_story_spec?.link_data?.image_hash) hash = creative.object_story_spec.link_data.image_hash;
+    if (!hash && creative.object_story_spec?.video_data?.image_hash) hash = creative.object_story_spec.video_data.image_hash;
+    if (!hash && creative.asset_feed_spec?.images?.[0]?.hash) hash = creative.asset_feed_spec.images[0].hash;
+    if (!hash && creative.object_story_spec?.link_data?.child_attachments?.[0]?.image_hash) hash = creative.object_story_spec.link_data.child_attachments[0].image_hash;
+    return hash || null;
+  }
+
+  private async fetchImageSources(
+    imageHashes: string[],
+    adAccountId: string,
+    accessToken: string,
+  ): Promise<Map<string, string>> {
+     const sourceMap = new Map<string, string>();
+     if (!imageHashes.length) return sourceMap;
+     
+     const now = Date.now();
+     const unresolved = new Set<string>();
+     for (const hash of imageHashes) {
+       const cached = this.imageSourceCache.get(hash);
+       if (cached && cached.expiresAt > now) {
+         sourceMap.set(hash, cached.url);
+       } else {
+         unresolved.add(hash);
+       }
+     }
+     
+     const unresolvedArray = Array.from(unresolved);
+     if (!unresolvedArray.length) return sourceMap;
+     
+     for (let i = 0; i < unresolvedArray.length; i += 50) {
+       const chunk = unresolvedArray.slice(i, i + 50);
+       try {
+         const result = await this.makeGraphApiCall(`/act_${adAccountId}/adimages`, accessToken, {
+           hashes: JSON.stringify(chunk),
+           fields: 'hash,permalink_url,url'
+         });
+         
+         if (result && result.data) {
+           for (const item of result.data) {
+             const highResUrl = item.permalink_url || item.url;
+             if (item.hash && highResUrl) {
+               sourceMap.set(item.hash, highResUrl);
+               this.imageSourceCache.set(item.hash, {
+                 url: highResUrl,
+                 expiresAt: now + 12 * 60 * 60 * 1000
+               });
+             }
+           }
+         }
+       } catch (error) {
+          this.logger.warn(`Failed to fetch high-res image hashes: ${error instanceof Error ? error.message : String(error)}`);
+       }
+     }
+     
+     return sourceMap;
   }
 
   async getDemographics(

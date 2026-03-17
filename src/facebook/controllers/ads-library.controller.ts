@@ -1,7 +1,8 @@
 import { Controller, Get, Post, Body, Query, Param, Res, UseGuards, BadRequestException } from '@nestjs/common';
-import type { Response } from 'express';
+import type { Response as ExpressResponse } from 'express';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../../auth/decorators/current-user.decorator';
+import { FacebookService } from '../facebook.service';
 
 interface AdsLibraryFilters {
   region?: string | string[];
@@ -43,6 +44,14 @@ interface TransformedAd {
 @Controller('facebook/ads-library')
 export class AdsLibraryController {
   private readonly graphApiVersion = 'v21.0';
+  private readonly accountAdsCacheTtlMs = 2 * 60 * 1000;
+  private readonly accountAdsCache = new Map<
+    string,
+    { data: any[]; expiresAt: number }
+  >();
+  private readonly accountAdsInFlight = new Map<string, Promise<any[]>>();
+
+  constructor(private readonly facebookService: FacebookService) {}
 
   // POST /facebook/ads-library - Search ads library
   @Post()
@@ -99,14 +108,16 @@ export class AdsLibraryController {
     ].join(',');
 
     try {
-      const rawAds = await this.fetchAccountAdsInChunks({
+      const rawAds = await this.fetchAccountAds({
         accessToken,
         adAccountId: cleanAdAccountId,
+        datePreset,
         fields,
         pageSize: 50,
-        maxRequests: 6,
+        maxRequests: 4,
       });
-      const transformedAds = this.transformAdAccountAds(rawAds, normalizedFilters, searchQuery);
+      const enrichedAds = await this.facebookService.enrichAdsWithHighResMedia(rawAds, cleanAdAccountId, accessToken);
+      const transformedAds = this.transformAdAccountAds(enrichedAds, normalizedFilters, searchQuery);
 
       // Apply client-side filters
       const minSpendFilter = normalizedFilters.minSpend ? parseFloat(normalizedFilters.minSpend) : null;
@@ -239,7 +250,7 @@ export class AdsLibraryController {
       filters?: AdsLibraryFilters;
       format?: 'csv' | 'json';
     },
-    @Res() res: Response,
+    @Res() res: ExpressResponse,
   ) {
     const { accessToken, searchQuery = '', adAccountId, filters = {}, format = 'csv' } = body;
 
@@ -275,14 +286,16 @@ export class AdsLibraryController {
     const cleanQuery = (searchQuery || '').trim();
 
     try {
-      const rawAds = await this.fetchAccountAdsInChunks({
+      const rawAds = await this.fetchAccountAds({
         accessToken,
         adAccountId: cleanAdAccountId,
+        datePreset,
         fields,
         pageSize: 50,
-        maxRequests: 12,
+        maxRequests: 8,
       });
-      const transformedAds = this.transformAdAccountAds(rawAds, normalizedFilters, cleanQuery);
+      const enrichedAds = await this.facebookService.enrichAdsWithHighResMedia(rawAds, cleanAdAccountId, accessToken);
+      const transformedAds = this.transformAdAccountAds(enrichedAds, normalizedFilters, cleanQuery);
       const ads = transformedAds.map((ad) => ({
         id: ad.id,
         pageName: ad.pageName,
@@ -412,6 +425,24 @@ export class AdsLibraryController {
         creative.object_story_spec?.video_data?.title ||
         '';
       const adCaption = creative.object_story_spec?.link_data?.caption || '';
+      
+      const imageUrl =
+        creative.enhancedImageUrl ||
+        creative.object_story_spec?.link_data?.picture ||
+        creative.object_story_spec?.video_data?.image_url ||
+        creative.object_story_spec?.photo_data?.url ||
+        creative.object_story_spec?.link_data?.child_attachments?.[0]?.picture ||
+        creative.asset_feed_spec?.images?.[0]?.url ||
+        creative.image_url || 
+        creative.thumbnail_url || 
+        null;
+
+      const videoUrl = 
+        creative.enhancedVideoUrl ||
+        creative.object_story_spec?.video_data?.video_url ||
+        creative.asset_feed_spec?.videos?.[0]?.url ||
+        null;
+
       const publisherPlatforms = ['facebook', 'instagram'];
 
       return {
@@ -420,8 +451,8 @@ export class AdsLibraryController {
         adCreativeLinkTitle: adTitle,
         adCreativeLinkDescription: adDescription,
         adCreativeLinkCaption: adCaption,
-        imageUrl: creative.image_url || creative.thumbnail_url || null,
-        videoUrl: null,
+        imageUrl: imageUrl,
+        videoUrl: videoUrl,
         thumbnailUrl: creative.thumbnail_url || creative.image_url || null,
         pageName: ad.campaign?.name || 'Your Ad Account',
         pageId: '',
@@ -484,25 +515,9 @@ export class AdsLibraryController {
       }
 
       const url = `https://graph.facebook.com/${this.graphApiVersion}/act_${adAccountId}/ads?${query.toString()}`;
-      const response = await fetch(url);
-
+      const response = await this.fetchWithRateLimitRetry(url);
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        const fbError = errorData?.error || {};
-        const fbCode = fbError?.code;
-        const fbMessage = String(fbError?.message || '');
-
-        if (
-          fbCode === 200 ||
-          fbMessage.includes('ads_management') ||
-          fbMessage.includes('ads_read')
-        ) {
-          throw new Error(
-            'Facebook permissions missing: ad account owner must grant ads_read and ads_management.',
-          );
-        }
-
-        throw new Error(fbMessage || 'Facebook API error');
+        throw await this.buildFacebookApiError(response);
       }
 
       const data = await response.json();
@@ -517,5 +532,106 @@ export class AdsLibraryController {
     }
 
     return collected;
+  }
+
+  private buildAccountAdsCacheKey(params: {
+    accessToken: string;
+    adAccountId: string;
+    datePreset: string;
+    fields: string;
+    pageSize: number;
+    maxRequests: number;
+  }): string {
+    const { accessToken, adAccountId, datePreset, fields, pageSize, maxRequests } = params;
+    const tokenTail = accessToken.slice(-12);
+    return `${adAccountId}:${datePreset}:${pageSize}:${maxRequests}:${tokenTail}:${fields}`;
+  }
+
+  private async fetchAccountAds(params: {
+    accessToken: string;
+    adAccountId: string;
+    datePreset: string;
+    fields: string;
+    pageSize: number;
+    maxRequests: number;
+  }): Promise<any[]> {
+    const cacheKey = this.buildAccountAdsCacheKey(params);
+    const now = Date.now();
+    const cached = this.accountAdsCache.get(cacheKey);
+
+    if (cached && cached.expiresAt > now) {
+      return cached.data;
+    }
+
+    const inFlight = this.accountAdsInFlight.get(cacheKey);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const request = this.fetchAccountAdsInChunks({
+      accessToken: params.accessToken,
+      adAccountId: params.adAccountId,
+      fields: params.fields,
+      pageSize: params.pageSize,
+      maxRequests: params.maxRequests,
+    })
+      .then((data) => {
+        this.accountAdsCache.set(cacheKey, {
+          data,
+          expiresAt: Date.now() + this.accountAdsCacheTtlMs,
+        });
+        return data;
+      })
+      .finally(() => {
+        this.accountAdsInFlight.delete(cacheKey);
+      });
+
+    this.accountAdsInFlight.set(cacheKey, request);
+    return request;
+  }
+
+  private async fetchWithRateLimitRetry(url: string): Promise<globalThis.Response> {
+    const maxAttempts = 3;
+    let response: globalThis.Response | null = null;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      response = await fetch(url);
+      if (response.ok) {
+        return response;
+      }
+
+      const errorData = await response.clone().json().catch(() => ({}));
+      const fbError = errorData?.error || {};
+      const fbCode = Number(fbError?.code || 0);
+      const fbSubcode = Number(fbError?.error_subcode || 0);
+
+      if (!this.isRateLimitError(fbCode, fbSubcode) || attempt === maxAttempts - 1) {
+        return response;
+      }
+
+      const retryDelayMs = 350 * (attempt + 1);
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    }
+
+    return response as globalThis.Response;
+  }
+
+  private isRateLimitError(code: number, subcode: number): boolean {
+    const rateLimitCodes = new Set([4, 17, 32, 613]);
+    const rateLimitSubcodes = new Set([2446079, 2446078]);
+    return rateLimitCodes.has(code) || rateLimitSubcodes.has(subcode);
+  }
+
+  private async buildFacebookApiError(response: globalThis.Response): Promise<Error> {
+    const errorData = await response.json().catch(() => ({}));
+    const fbError = errorData?.error || {};
+    const fbCode = fbError?.code;
+    const fbMessage = String(fbError?.message || '');
+
+    if (fbCode === 200 || fbMessage.includes('ads_management') || fbMessage.includes('ads_read')) {
+      return new Error('Facebook permissions missing: ad account owner must grant ads_read and ads_management.');
+    }
+
+    return new Error(fbMessage || 'Facebook API error');
   }
 }
