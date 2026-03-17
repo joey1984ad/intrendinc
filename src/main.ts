@@ -7,6 +7,8 @@ import compression from 'compression';
 import helmet from 'helmet';
 import * as fs from 'fs';
 import * as path from 'path';
+import { json, urlencoded } from 'express';
+
 
 async function bootstrap() {
   // Load SSL certificates for HTTPS (development only)
@@ -70,6 +72,10 @@ async function bootstrap() {
 
   // Cookies
   app.use(cookieParser());
+
+  // Increase JSON payload limits for bulk saves
+  app.use(json({ limit: '50mb' }));
+  app.use(urlencoded({ extended: true, limit: '50mb' }));
 
   // Validation
   app.useGlobalPipes(
