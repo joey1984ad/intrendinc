@@ -230,13 +230,18 @@ export class BigQueryService implements OnModuleInit {
 
     this.logger.log(`[BQ INSERT] table=${tableName} rowCount=${rows.length}`);
     const table = this.dataset.table(tableName);
+    const batchRows = (batch: Record<string, any>[]) =>
+      batch.map((row) => ({
+        insertId: this.buildInsertId(tableName, row),
+        json: row,
+      }));
 
     const BATCH_SIZE = 5000;
     for (let i = 0; i < rows.length; i += BATCH_SIZE) {
       const batch = rows.slice(i, i + BATCH_SIZE);
       this.logger.log(`[BQ INSERT] Inserting batch ${Math.floor(i/BATCH_SIZE)+1} (rows ${i}–${i+batch.length})`);
       try {
-        await table.insert(batch, {
+        await table.insert(batchRows(batch), {
           skipInvalidRows: false,
           ignoreUnknownValues: false,
         });
@@ -266,7 +271,7 @@ export class BigQueryService implements OnModuleInit {
       throw new Error('BigQuery is not initialized');
     }
 
-    const sql = `
+    const sql = (startDate: string, endDate: string) => `
       DELETE FROM \`${this.projectId}.${this.datasetId}.${tableName}\`
       WHERE user_id = @userId
         AND customer_id = @customerId
@@ -274,11 +279,11 @@ export class BigQueryService implements OnModuleInit {
     `;
 
     this.logger.log(`[BQ DELETE] table=${tableName} userId=${conditions.userId} customerId=${conditions.customerId} range=${conditions.startDate}→${conditions.endDate}`);
-    this.logger.log(`[BQ DELETE] SQL: ${sql.trim()}`);
+    this.logger.log(`[BQ DELETE] SQL: ${sql(conditions.startDate, conditions.endDate).trim()}`);
 
     try {
       const [job] = await this.bigquery.createQueryJob({
-        query: sql,
+        query: sql(conditions.startDate, conditions.endDate),
         location: this.location,
         params: {
           userId: conditions.userId,
@@ -294,11 +299,63 @@ export class BigQueryService implements OnModuleInit {
       this.logger.log(`[BQ DELETE] Done. rows affected=${affected}`);
       return affected;
     } catch (error: any) {
-      this.logger.error(`[BQ DELETE] FAILED on table=${tableName}: ${error.message}`);
+      const message = String(error?.message || '');
+      if (message.includes('streaming buffer')) {
+        const safeEndDate = this.subtractDays(conditions.endDate, 1);
+        if (!safeEndDate || safeEndDate < conditions.startDate) {
+          this.logger.warn(
+            `[BQ DELETE] streaming buffer active; skipping delete for ${tableName} range=${conditions.startDate}→${conditions.endDate}`,
+          );
+          return 0;
+        }
+        this.logger.warn(
+          `[BQ DELETE] streaming buffer active; retrying delete for ${tableName} range=${conditions.startDate}→${safeEndDate}`,
+        );
+        const [job] = await this.bigquery.createQueryJob({
+          query: sql(conditions.startDate, safeEndDate),
+          location: this.location,
+          params: {
+            userId: conditions.userId,
+            customerId: conditions.customerId,
+            startDate: conditions.startDate,
+            endDate: safeEndDate,
+          },
+        });
+        const [result] = await job.getQueryResults();
+        const affected = (job.metadata?.statistics?.query?.numDmlAffectedRows as number) || 0;
+        this.logger.log(`[BQ DELETE] Done after retry. rows affected=${affected}`);
+        return affected;
+      }
+
+      this.logger.error(`[BQ DELETE] FAILED on table=${tableName}: ${message}`);
       this.logger.error(`[BQ DELETE] code=${error.code} status=${error.status}`);
       this.logger.error(`[BQ DELETE] full=${JSON.stringify(error, Object.getOwnPropertyNames(error))}`);
       throw error;
     }
+  }
+
+  private buildInsertId(tableName: string, row: Record<string, any>): string {
+    const safe = (value: any) => (value === undefined || value === null ? '' : String(value));
+    switch (tableName) {
+      case 'daily_account_metrics':
+        return `${safe(row.user_id)}:${safe(row.customer_id)}:${safe(row.date)}`;
+      case 'campaigns':
+        return `${safe(row.user_id)}:${safe(row.customer_id)}:${safe(row.date)}:${safe(row.campaign_id)}`;
+      case 'ad_groups':
+        return `${safe(row.user_id)}:${safe(row.customer_id)}:${safe(row.date)}:${safe(row.ad_group_id)}`;
+      case 'ads':
+        return `${safe(row.user_id)}:${safe(row.customer_id)}:${safe(row.date)}:${safe(row.ad_id)}`;
+      default:
+        return `${tableName}:${safe(row.user_id)}:${safe(row.customer_id)}:${safe(row.date)}`;
+    }
+  }
+
+  private subtractDays(dateStr: string, days: number): string | null {
+    if (!dateStr) return null;
+    const date = new Date(`${dateStr}T00:00:00Z`);
+    if (Number.isNaN(date.getTime())) return null;
+    date.setUTCDate(date.getUTCDate() - days);
+    return date.toISOString().slice(0, 10);
   }
 
   /**
